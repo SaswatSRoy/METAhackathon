@@ -38,6 +38,8 @@ Tools, each executed locally by the SymPy referee; every annotation comes from a
 | `check_steps` | ticks, circle + note on the first wrong line | `check` |
 | `give_hint` | hint at `hint_level` (or a next-step nudge) | `hint` |
 | `finish_answer` | `write`s the remaining steps | `answer` |
+| `next_step` | `write`s ONLY the next single step after the last correct line (verified by the referee first); if a line is wrong, hint behaviour instead (circle + note) | `next` (`hint` when a line is wrong) |
+| `explain_rule` | a short "why" `note` (rule + formula) beside the latest step, or beside the first mistake (+ `circle`) | `why` |
 | `typeset_lines` | a `typeset` annotation per readable line | `typeset` |
 | `sketch_graph` | one `graph` annotation | `graph` |
 | `differentiate_check` | d/dx of the student's antiderivative vs the integrand (derivative pages: same as check_steps) | `check` |
@@ -45,10 +47,27 @@ Tools, each executed locally by the SymPy referee; every annotation comes from a
 Online + `mode: "auto"`: Muse Spark gets the command, the page lines and the tool
 definitions (`tool_choice: "auto"`), at most 4 model calls; a plain-text reply with no tool
 call is routed by keywords. Offline, an explicit `mode`, or an API failure: keyword routing,
-`tidy`/`typeset`/`neat` → typeset, `graph`/`plot`/`sketch` → graph, `check … differentiat…`
-→ differentiate_check, `answer`/`finish`/`just give` → answer, `check`/`is this right` → check,
-anything else → hint. Annotations from several tools are merged: exact duplicates dropped, at
+in this order: `tidy`/`typeset`/`neat` → typeset, `graph`/`plot`/`sketch` → graph,
+`check … differentiat…` → differentiate_check, `what's next`/`next step`/`what now`/`continue`/
+`keep going` → next_step, `why`/`explain`/`how does this work` → explain_rule,
+`answer`/`finish`/`just give` → answer, `check`/`is this right` → check, anything else → hint. Annotations from several tools are merged: exact duplicates dropped, at
 most one `note` per line (first tool wins). `mode` is that of the first tool that ran.
+
+**next** (Writey's "what's next?"): the first step of the referee's solution from the last
+correct expression, e.g. `∫ x cos x dx` → `= x sin x - ∫ sin x dx` (by parts), `∫ x^2 dx` →
+`= x^3/3 + C`, `d/dx (x^2 sin x)` → `= (x^2)' sin x + x^2 (sin x)'`, `∫_0^1 x^2 dx` →
+`= [x^3/3]_0^1` → `= 1/3`. Exactly one `write` (with `latex`), `after` = the last `ok`/`start`
+line. Nothing left: a `note` ("That's the answer!", or "Don't forget + C"). A step the referee
+does not accept is never written (a nudge `note` instead).
+
+**why** (Writey's "why does this work?"): one `note` with up to 3 lines (each ≤ 12 words,
+joined by `"\n"` in `text`): the idea, the formula, and a context line from SymPy (`Here u = x,
+dv = cos x dx`) or a tip. Topic from the referee: the first mistake's diagnosis (product rule,
+chain rule, power rule, trig derivative sign, sign of ∫ sin, constant factor, missing + C,
+definite-integral slips → FTC, differentiated instead of integrated, …), else the technique of
+the latest step (by parts, u-sub, power rule, chain/product rule, FTC). Formulas always come
+from fixed templates; online, Muse Spark may reword only the plain-word lines (rewrites with
+maths, digits or > 12 words are dropped).
 
 ## What the referee understands
 
@@ -72,7 +91,7 @@ Request JSON:
     {"id": "L1", "text": "∫ x cos(x) dx", "bbox": [x, y, w, h]}
   ],
   "command": "hey meta help me with this integral",   // raw words from voice/typed
-  "mode": "auto",          // "hint" | "answer" | "check" | "typeset" | "graph" | "auto" (derive from command)
+  "mode": "auto",          // "hint" | "answer" | "check" | "typeset" | "graph" | "next" | "why" | "auto" (derive from command)
   "hint_level": 1,         // 1 gentle nudge, 2 name the rule, 3 show the fix
   // Optional, used only when the decision router is on (then hint_level is the highest level allowed):
   "hints_given": 0,        // hints already given on the current line
@@ -93,10 +112,14 @@ Response JSON:
   "annotations": [
     {"kind": "circle", "target": "L3"},
     {"kind": "note",   "target": "L3", "text": "You dropped a minus sign here", "side": "right"},
-    {"kind": "write",  "after": "L4", "text": "= x sin(x) + cos(x) + C"},   // answer mode: new lines appended below
+    {"kind": "write",  "after": "L4", "text": "= x sin(x) + cos(x) + C",
+     "latex": "= x \\sin{\\left(x \\right)} + \\cos{\\left(x \\right)} + C"},   // answer/next mode: new lines appended below
     {"kind": "tick",   "target": "L2"},
     {"kind": "underline", "target": "L4"},                     // later lines that inherit the error
-    {"kind": "ghost",  "after": "L3", "text": "= x sin(x) + cos(x) + C"},  // hint_level 3 (hint mode)
+    {"kind": "ghost",  "after": "L3", "text": "= x sin(x) + cos(x) + C", "latex": "= ..."},  // hint_level 3 (hint mode)
+    {"kind": "note",   "target": "L2", "side": "right",                    // why mode
+     "text": "Parts swaps a hard integral for an easier one.\n∫ u dv = uv − ∫ v du\nHere u = x, dv = cos x dx",
+     "latex": "\\int u\\,dv = uv - \\int v\\,du", "latex_line": 1},
     {"kind": "typeset", "target": "L1", "text": "∫ x·cos x dx", "latex": "\\int x \\cos{\\left(x \\right)}\\, dx"},
     {"kind": "graph", "after": "L3", "fn": "x sin x + cos x", "points": [[-6.28, 1.0], ...],
      "xrange": [-6.283, 6.283], "yrange": [-5.9, 4.5],
@@ -108,9 +131,9 @@ Response JSON:
   ]
 }
 ```
-`mode` is one of `hint | answer | check | typeset | graph` (request `mode` accepts the same
-plus `auto`). `agent_trace` is always present (may hold just one entry); each `summary` is
-≤ 90 chars. Trace tools: the six tools above, plus `read_page` (lines read from the image),
+`mode` is one of `hint | answer | check | typeset | graph | next | why` (request `mode`
+accepts the same plus `auto`). `agent_trace` is always present (may hold just one entry); each `summary` is
+≤ 90 chars. Trace tools: the eight tools above, plus `read_page` (lines read from the image),
 `route` (keyword/explicit routing), `muse-spark` (a model reply that was not a tool call),
 `router` (the decision router's choice, or why it fell back), `none` (no lines).
 
@@ -125,12 +148,15 @@ Annotation kinds:
 |------|--------|------|
 | `tick` | `target` | each `ok` line before the first wrong one |
 | `circle` | `target` | the first wrong line |
-| `note` | `target`, `text` (≤ ~8 words), `side` | hint next to a line. `target` may be `null` (no lines at all, e.g. offline with an image only): render it at the top of the page |
+| `note` | `target`, `text` (≤ ~8 words), `side`; optional `latex`, `latex_line` | hint next to a line. `target` may be `null` (no lines at all, e.g. offline with an image only): render it at the top of the page. Why mode: `text` may hold up to 3 lines separated by `"\n"` (≤ 12 words each); when one of them is a formula, `latex` is that formula and `latex_line` its 0-based index in the split `text` (draw the LaTeX in place of that line, or keep the plain line as a fallback). Other notes are plain text with no `latex` |
 | `underline` | `target` | every later line after the first wrong one (it inherits the error; those lines have status `unchecked`) |
-| `ghost` | `after`, `text` | hint_level 3 in hint mode: the corrected version of the wrong line (or the next step when nothing is wrong), drawn faintly under `after` instead of revealing the whole answer |
-| `write` | `after`, `text` | answer mode: remaining steps. Several writes share the same `after` (the last line): stack them in array order |
+| `ghost` | `after`, `text`, `latex` | hint_level 3 in hint mode: the corrected version of the wrong line (or the next step when nothing is wrong), drawn faintly under `after` instead of revealing the whole answer |
+| `write` | `after`, `text`, `latex` | answer mode: remaining steps. Several writes share the same `after` (the last line): stack them in array order. Next mode: exactly one write after the last correct line |
 | `typeset` | `target`, `text`, `latex` | typeset mode: the neat typed version of that line. `text` is unicode in the student's own order (`∫ x·cos x dx`, `x²`, `∫₀¹`, `[x³/3]₀¹`, `−`); `latex` is SymPy's reading of the line (may reorder terms). Unreadable lines get none |
 | `graph` | `after`, `fn`, `points`, `xrange`, `yrange`; optional `overlay`, `overlay_fn`, `shade` | graph mode: a small plot under `after` (the last line). `points` are ~120 `[x, y]` samples of `fn` (non-finite values skipped, so there can be gaps; points far outside `yrange` are dropped: clip to `yrange`). Indefinite integral: `fn` is the integrand until the student's answer is correct, then `fn` is the antiderivative and `overlay` the integrand. Derivative: `fn` is the function, `overlay` its derivative once finished. Definite integral: `fn` is the integrand and `shade: [a, b]` is the area to fill. Nothing graphable → a `note` instead |
+
+`latex` on `write`/`ghost`/`typeset` is SymPy's LaTeX of the parsed `text` (may reorder terms),
+keeping a leading `= ` and a trailing ` + C`; never empty (an unreadable part becomes `\text{…}`).
 
 Server notes: if `lines` has any non-empty text, those lines are used as is and the
 image is ignored. Otherwise the image is read by Muse Spark (online only), and the server

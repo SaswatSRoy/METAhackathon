@@ -25,7 +25,7 @@ log = logging.getLogger("margin.meta")
 BASE_URL = os.getenv("MODEL_BASE_URL", "https://api.meta.ai/v1")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "muse-spark-1.3")
 VOICE_MODEL = os.getenv("VOICE_MODEL", "muse-voice-transcribe-1.0")
-INTENTS = ("hint", "answer", "check", "typeset", "graph", "verify")
+INTENTS = ("hint", "answer", "check", "typeset", "graph", "verify", "next", "why")
 AGENT_MAX_ITERS = 4
 MAX_IMAGE_CHARS = 5_000_000
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -327,15 +327,23 @@ def read_page(image_dataurl: str) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------- intent
 
 
+NEXT_RE = re.compile(r"what'?s next|what is next|what next|next step|what now|\bcontinue\b|keep going|one more step")
+WHY_RE = re.compile(r"\bwhy\b|\bexplain|how does (?:this|that|it) work|how did (?:you|that)")
+
+
 def keyword_intent(command: str) -> str:
-    """Offline intent from keywords: typeset / graph / verify / answer / check / hint."""
-    c = (command or "").lower()
+    """Offline intent from keywords: typeset / graph / verify / next / why / answer / check / hint."""
+    c = (command or "").lower().replace("’", "'")
     if any(k in c for k in ("tidy", "typeset", "neat", "type it up", "clean up", "write it out properly")):
         return "typeset"
     if any(k in c for k in ("graph", "plot", "sketch", "draw the curve", "draw it")):
         return "graph"
     if "check" in c and any(k in c for k in ("differentiat", "derivative")):
         return "verify"  # "check it by differentiating"
+    if NEXT_RE.search(c):
+        return "next"
+    if WHY_RE.search(c):
+        return "why"
     if any(k in c for k in ("answer", "solution", "solve it", "finish", "just give", "show me how", "do it for me")):
         return "answer"
     if any(k in c for k in ("check", "is this right", "am i right", "correct?", "verify")):
@@ -351,7 +359,8 @@ def classify_intent(command: str) -> str:
         {"role": "system", "content": "Classify a student's request to a math tutor. Reply with exactly one word: "
          "hint (wants help or a nudge), answer (wants the full solution or remaining steps), "
          "check (wants to know whether their work is right), typeset (wants the page tidied or typed up), "
-         "graph (wants a graph or sketch), or verify (wants the answer checked by differentiating)."},
+         "graph (wants a graph or sketch), verify (wants the answer checked by differentiating), "
+         "next (wants only the next step written), or why (wants the rule behind a step explained)."},
         {"role": "user", "content": command},
     ], max_tokens=1500)
     word = (reply or "").strip().lower().strip(".!\"'")
@@ -364,7 +373,9 @@ AGENT_PROMPT = """You are Margin, a calculus tutor that writes tiny notes in ink
 You act ONLY through tools. Every tool runs a SymPy referee on the page and writes the ink itself;
 you never write mathematics, answers or hints yourself.
 Pick the tool(s) that match the request, usually exactly one:
-- help / stuck / hint / what next -> give_hint
+- help / stuck / hint -> give_hint
+- what's next / next step / continue -> next_step (writes one step only)
+- why / explain / how does this work -> explain_rule
 - is this right / check -> check_steps
 - just give me the answer / finish it -> finish_answer
 - tidy / typeset / neat -> typeset_lines
@@ -500,6 +511,34 @@ def phrase_hint(verdict: str, line: str, level: int, fallback: str | None = None
     if not hint or len(hint.split()) > 10:
         return fallback
     return hint
+
+
+def phrase_why(prose: list[str], topic: str) -> list[str] | None:
+    """Muse Spark rewords the plain-word lines of a why-note (never the formula or maths).
+
+    Returns None offline or when the reply is unusable; explain.explanation() also rejects
+    any line with maths in it or over 12 words, keeping the template's own line.
+    """
+    if is_offline() or not prose:
+        return None
+    reply = _chat([
+        {"role": "system", "content": (
+            "You reword tiny margin notes that explain a calculus rule to a student. Reword each line "
+            "in a friendly voice, at most 12 words per line, same meaning. Plain words only: no "
+            "formulas, symbols, digits or variable letters. Return ONLY JSON: {\"lines\": [...]} "
+            "with exactly as many lines as given.")},
+        {"role": "user", "content": json.dumps({"rule": topic.replace("_", " "), "lines": prose})},
+    ], max_tokens=1500)
+    if not reply:
+        return None
+    try:
+        data = _extract_json(reply)
+    except ValueError:
+        return None
+    lines = data.get("lines") if isinstance(data, dict) else data
+    if not isinstance(lines, list) or len(lines) != len(prose):
+        return None
+    return [str(l).strip() for l in lines]
 
 
 # --------------------------------------------------------------------------- voice

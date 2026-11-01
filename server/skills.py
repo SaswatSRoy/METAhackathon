@@ -4,8 +4,9 @@ The Muse Spark agent (meta_client.run_agent) only chooses which tools to call; e
 annotation on the page comes out of a tool here, never out of the model's own text.
 Offline, `Toolbox.route(intent)` picks the tool from keywords.
 
-Tools: check_steps, give_hint, finish_answer, typeset_lines, sketch_graph,
-differentiate_check. See docs/CONTRACT.md for the annotation kinds.
+Tools: check_steps, give_hint, finish_answer, next_step, explain_rule, typeset_lines,
+sketch_graph, differentiate_check. See docs/CONTRACT.md for the annotation kinds.
+Every `write`, `ghost` and `typeset` annotation carries `latex` (SymPy's reading of its text).
 """
 
 from __future__ import annotations
@@ -15,17 +16,19 @@ from typing import Any, Callable
 
 import sympy as sp
 
-from . import checker, meta_client, render
+from . import checker, explain, meta_client, render
 
 # Which response "mode" a tool stands for.
 TOOL_MODE = {
     "check_steps": "check", "give_hint": "hint", "finish_answer": "answer",
     "typeset_lines": "typeset", "sketch_graph": "graph", "differentiate_check": "check",
+    "next_step": "next", "explain_rule": "why",
 }
 # Offline / explicit intent -> tool.
 INTENT_TOOL = {
     "hint": "give_hint", "answer": "finish_answer", "check": "check_steps",
     "typeset": "typeset_lines", "graph": "sketch_graph", "verify": "differentiate_check",
+    "next": "next_step", "why": "explain_rule",
 }
 
 # OpenAI-style tool definitions sent to Muse Spark (chat completions `tools`).
@@ -46,6 +49,18 @@ TOOL_SPECS: list[dict[str, Any]] = [
         "name": "finish_answer",
         "description": "Write the remaining steps and the final answer below the last line. Only when "
                        "the student explicitly asks for the answer or the solution.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "next_step",
+        "description": "Write ONLY the next single step after the student's last correct line (checked "
+                       "by the referee first). If a line is wrong it gives a hint on that line instead. "
+                       "Use when the student asks what's next, for the next step, or to continue.",
+        "parameters": {"type": "object", "properties": {}}}},
+    {"type": "function", "function": {
+        "name": "explain_rule",
+        "description": "Write a short explanation (the rule and its formula) beside the latest step, or "
+                       "beside the first mistake if there is one. Use when the student asks why, asks "
+                       "you to explain, or asks how a step works.",
         "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
         "name": "typeset_lines",
@@ -73,6 +88,16 @@ TOOL_SPECS: list[dict[str, Any]] = [
 
 def _note(target: str | None, text: str) -> dict[str, Any]:
     return {"kind": "note", "target": target, "text": text, "side": "right"}
+
+
+MATH_KINDS = ("write", "ghost", "typeset")
+
+
+def with_latex(a: dict[str, Any]) -> dict[str, Any]:
+    """Give a maths-bearing annotation (write/ghost/typeset) its `latex`, if it has none."""
+    if a.get("kind") in MATH_KINDS and not a.get("latex") and a.get("text"):
+        a["latex"] = checker.latex_for_text(a["text"])
+    return a
 
 
 # --------------------------------------------------------------------------- annotate
@@ -110,7 +135,7 @@ def annotate(result: checker.CheckResult, mode: str, level: int) -> list[dict[st
         if not steps and not wrong:
             text = last.note or ("That's the answer!" if result.finished else "Nothing left to solve")
             ann.append(_note(last.id, text))
-    return ann
+    return [with_latex(a) for a in ann]
 
 
 def _all_correct_notes(result: checker.CheckResult, mode: str, level: int,
@@ -149,6 +174,7 @@ class Toolbox:
             "check_steps": self.check_steps, "give_hint": self.give_hint,
             "finish_answer": self.finish_answer, "typeset_lines": self.typeset_lines,
             "sketch_graph": self.sketch_graph, "differentiate_check": self.differentiate_check,
+            "next_step": self.next_step, "explain_rule": self.explain_rule,
         }
 
     # ------------------------------------------------------------------ running
@@ -158,14 +184,17 @@ class Toolbox:
         fn = self.tools.get(name)
         if fn is None:
             return {"error": f"unknown tool {name}"}
+        mode = TOOL_MODE.get(name)
         try:
-            ann, summary = fn(**_clean_args(fn, args or {}))
+            out = fn(**_clean_args(fn, args or {}))
+            ann, summary = out[0], out[1]
+            mode = out[2] if len(out) > 2 else mode  # a tool may answer in another mode
         except Exception as exc:  # a tool must never take the page down
             ann, summary = [], f"failed: {type(exc).__name__}"
-        added = self._add(ann)
+        added = self._add([with_latex(a) for a in ann])
         self.trace.append({"tool": name, "summary": summary[:90]})
-        if name in TOOL_MODE:
-            self.modes.append(TOOL_MODE[name])
+        if mode:
+            self.modes.append(mode)
         return {"summary": summary, "annotations_added": added, "first_wrong": self.result.first_wrong,
                 "finished": self.result.finished}
 
@@ -215,6 +244,49 @@ class Toolbox:
         ann = annotate(self.result, "answer", self.level)
         n = sum(1 for a in ann if a["kind"] == "write")
         return ann, f"wrote {n} step(s)" + (f"; {self.result.first_wrong} wrong" if self.result.first_wrong else "")
+
+    def next_step(self) -> tuple[list[dict[str, Any]], str, str]:
+        """One step past the last correct line, verified by the referee; a hint if a line is wrong."""
+        r = self.result
+        if r.wrong is not None:
+            ann = annotate(r, "hint", self.level)
+            return ann, f"next: {r.first_wrong} wrong, hint instead", "hint"
+        good = [l for l in r.lines if l.status in ("ok", "start")]
+        if not good:
+            last = r.lines[-1].id if r.lines else None
+            return [_note(last, "I can't read this line yet")], "next: nothing readable", "next"
+        after = good[-1]
+        if after.note:  # e.g. "Don't forget + C": the only thing left
+            return [_note(after.id, after.note)], "next: " + after.note, "next"
+        steps = checker.solve_remaining(r)
+        if not steps:
+            text = "That's the answer!" if r.finished else "Nothing left to solve"
+            return [_note(after.id, text)], "next: nothing left", "next"
+        step = steps[0]
+        if not self._step_checks(step):
+            nudges = checker.next_step_hints(r)
+            text = nudges[1] if nudges else "Try the next step yourself"
+            return [_note(after.id, text)], "next: step failed the referee; nudge", "next"
+        return ([{"kind": "write", "after": after.id, "text": step,
+                  "latex": checker.latex_for_text(step)}], f"next step: {step}", "next")
+
+    def _step_checks(self, step: str) -> bool:
+        """The referee accepts `step` written under the page's lines."""
+        page = [{"id": str(l.get("id") or f"L{i}"), "text": str(l.get("text") or "")}
+                for i, l in enumerate(self.lines, 1)]
+        res = checker.check_lines(page + [{"id": "_next", "text": step}])
+        return res.first_wrong is None and res.lines[-1].status == "ok"
+
+    def explain_rule(self) -> tuple[list[dict[str, Any]], str]:
+        """A short why-note (rule + formula) beside the latest step or the first mistake."""
+        ex = explain.explanation(self.result, reword=meta_client.phrase_why)
+        note = _note(ex["target"], "\n".join(ex["lines"]))
+        if ex["latex"]:
+            note["latex"] = ex["latex"]
+            note["latex_line"] = ex["latex_line"]
+        ann = [{"kind": "circle", "target": ex["target"]}] if ex["mistake"] and self.result.wrong else []
+        what = "mistake" if ex["mistake"] else "step"
+        return ann + [note], f"why: {ex['topic'].replace('_', ' ')} ({what} at {ex['target']})"
 
     def typeset_lines(self) -> tuple[list[dict[str, Any]], str]:
         ann = []
