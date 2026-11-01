@@ -2,6 +2,7 @@
 import { Notebook, PAGE_W, PAGE_H, PEN_SIZES, rowY, RULE } from './ink.js';
 import { saveImage, savePdfPages, isPdf } from './images.js';
 import { MetaInk, assist } from './assistant.js';
+import { Suggest } from './suggest.js';
 import { Voice } from './voice.js';
 import { store, authClient, newPage, createNotebook } from './store.js';
 import { Shelf } from './shelf.js';
@@ -25,6 +26,8 @@ const nb = new Notebook({
 const meta = new MetaInk($('#meta'), nb, {
   onReveal: reveal,
   onNoteTap: () => callMeta('more please, be more specific', 'hint', { escalate: true }),
+  onRedo: ask => ask ? callMeta(ask.command, ask.mode, { hintLevel: ask.hint_level }) : callMeta('just give me the answer', 'answer'),
+  onCommit: () => scheduleSave(),
 });
 nb.ext = { save: () => meta.save(), load: m => meta.load(m) };    // Meta's ink is part of undo/redo
 
@@ -96,6 +99,7 @@ async function showPage(i, { force = false } = {}) {
   if (!force && i === state.idx) return;
   if (!force) await saveNow();
   closeCmd();
+  suggest.cancel();
   state.idx = i;
   const p = current();
   meta.restore(p.meta);
@@ -393,7 +397,7 @@ function nextHintLevel(lines, sig, escalate) {
   return same || escalate ? Math.min(3, hintMemo.level + 1) : 1;
 }
 
-async function callMeta(command, mode = 'auto', { escalate = false } = {}) {
+async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null } = {}) {
   if (busy || !current()) return;
   nb.commitInput();
   dismissCoach();
@@ -401,12 +405,13 @@ async function callMeta(command, mode = 'auto', { escalate = false } = {}) {
   if (!lines.length && !nb.hasStrokes() && !nb.hasImages()) { toast('Write something on the page first, then ask Meta.'); return; }
   if (/^(more|more help|another hint|next hint|a bit more)\b/i.test(command.trim())) { mode = 'hint'; escalate = true; }
   const sig = nb.signature();
+  suggest.cancel();
   const pageId = current().id;
   const payload = {
     lines,
     command,
     mode,
-    hint_level: nextHintLevel(lines, sig, escalate),
+    hint_level: hintLevel || nextHintLevel(lines, sig, escalate),
     notebook_id: state.book?.id || null,
     page_id: pageId,
   };
@@ -423,8 +428,13 @@ async function callMeta(command, mode = 'auto', { escalate = false } = {}) {
     hintMemo = resp.mode === 'hint' && wrong ? { sig, text: wrong.text, level: payload.hint_level } : null;
     nb.checkpoint();                                 // undo removes Meta's new ink
     page.classList.remove('meta-hidden');
-    await meta.render(resp, lines);
-    if (current()?.id === pageId) saveNow();
+    await meta.render(resp, lines, { command, mode, hint_level: payload.hint_level });
+    if (current()?.id === pageId) {
+      saveNow();
+      // After a hint: offer "Why?" and the next step right by it.
+      const note = resp.mode === 'hint' && meta.marks.find(m => m.kind === 'note');
+      if (note && suggestOn()) { const b = note.boxes.at(-1); suggest.show(['why', 'next'], { x: b[0] + b[2] - 10, y: b[1] + b[3] + 22 }); }
+    }
   } catch (err) {
     console.warn('[margin] assist failed:', err);
     toast(err.name === 'AbortError' ? 'Meta took too long. Try again in a moment.' : 'Can’t reach Meta right now. Keep writing; your page is safe.');
@@ -477,20 +487,24 @@ function showReading(on) {
   reveal([clamp(x + 24, 110, PAGE_W - 270), clamp(y - 58, 70, PAGE_H - 60), 250, 40]);
 }
 
-// Optional: check automatically ~2.5 s after the pen is lifted.
-let autoTimer, autoSig = '';
+// Pause suggestions (replaces Auto-check): ~2 s after the pen stops on a page with maths, a few
+// small ranked chips appear by the pen. On by default; the toolbar toggle turns them off.
 const autoBtn = $('#auto');
-autoBtn.onclick = () => autoBtn.setAttribute('aria-pressed', autoBtn.getAttribute('aria-pressed') !== 'true');
-function scheduleAutoCheck() {
-  clearTimeout(autoTimer);
-  if (autoBtn.getAttribute('aria-pressed') !== 'true') return;
-  autoTimer = setTimeout(() => {
-    const sig = nb.signature();
-    if (sig === autoSig || nb.active || nb.input) return;
-    autoSig = sig;
-    callMeta('check my work', 'check');
-  }, 2500);
-}
+const suggestOn = () => autoBtn.getAttribute('aria-pressed') === 'true';
+try { if (localStorage.getItem('margin.suggest') === 'off') autoBtn.setAttribute('aria-pressed', 'false'); } catch { /* private mode */ }
+autoBtn.onclick = () => {
+  const on = !suggestOn();
+  autoBtn.setAttribute('aria-pressed', on);
+  try { localStorage.setItem('margin.suggest', on ? 'on' : 'off'); } catch { /* private mode */ }
+  if (!on) suggest.cancel();
+};
+const lastHint = () => meta.marks.some(m => m.kind === 'note' && m.note);
+const suggest = new Suggest(page, {
+  nb, enabled: suggestOn, hinted: lastHint,
+  canShow: () => !busy && !!state.book && cmd.hidden,
+  onPick: c => callMeta(c.say, c.mode),
+});
+function scheduleAutoCheck() { suggest.poke(); }
 
 // ---- command pill ("/") -------------------------------------------------------------------
 const cmd = $('#cmd'), cmdInput = $('#cmd input');
@@ -648,4 +662,4 @@ $('#account-btn')?.addEventListener('click', openAccountModal);
 })();
 
 // Exposed for debugging and tests.
-window.margin = { nb, meta, zoom, state, callMeta, demo, addPage, showPage, saveNow, store, authClient, setTool, insertImage, pageFromFile };
+window.margin = { nb, meta, suggest, zoom, state, callMeta, demo, addPage, showPage, saveNow, store, authClient, setTool, insertImage, pageFromFile };

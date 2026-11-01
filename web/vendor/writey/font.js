@@ -1,0 +1,52 @@
+// Copyright (c) 2026 Writey contributors. MIT License, see ./LICENSE.
+// Ported from Writey (MIT), github.com/lagoonitself/writey, packages/inkscript/src/font.ts:
+// TypeScript types stripped, imports made browser ES modules (no build step).
+import { GLYPHS } from './glyphs.js';
+/** Height of a lowercase letter, and of the math axis (where minus signs and fraction bars sit). */
+export const X_HEIGHT = 0.35;
+export const AXIS = 0.24;
+export const CAP_HEIGHT = 0.66;
+const cache = new Map();
+const ALIASES = {
+    '’': "'",
+    '‘': "'",
+    '“': '"',
+    '”': '"',
+    '−': '-',
+    '·': '⋅',
+    ϵ: 'ε',
+    ϕ: 'φ',
+    ϑ: 'θ',
+    '∥': '‖',
+    ' ': ' ',
+};
+export function glyph(ch) {
+    const key = ALIASES[ch] ?? ch;
+    if (cache.has(key))
+        return cache.get(key) ?? null;
+    const raw = GLYPHS[key];
+    let g = null;
+    if (raw) {
+        const strokes = raw[1].map((s) => s.map((n) => n / 1000));
+        let x0 = Number.POSITIVE_INFINITY;
+        let x1 = Number.NEGATIVE_INFINITY;
+        let y0 = 0;
+        let y1 = 0;
+        for (const s of strokes) {
+            for (let i = 0; i < s.length; i += 2) {
+                x0 = Math.min(x0, s[i]);
+                x1 = Math.max(x1, s[i]);
+                y0 = Math.min(y0, s[i + 1]);
+                y1 = Math.max(y1, s[i + 1]);
+            }
+        }
+        if (!strokes.length) {
+            x0 = 0;
+            x1 = raw[0] / 1000;
+        }
+        g = { w: raw[0] / 1000, x0, x1, h: -y0, d: y1, strokes };
+    }
+    cache.set(key, g);
+    return g;
+}
+export const hasGlyph = (ch) => glyph(ch) !== null;

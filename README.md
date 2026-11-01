@@ -76,3 +76,15 @@ Render also works: New Web Service → this repo → Docker, and add `MODEL_API_
 - The live Meta API path (page reading, hint wording, transcription) has not been run yet: needs a key.
 - Maths scope: first-year integrals and derivatives; quotient-rule mistakes get only a generic hint.
 - Voice wake word needs Chrome; not tested on a real iPad / Apple Pencil. Notebooks are saved in the browser on one device (no accounts or sync).
+
+## Credits
+
+- **[Writey](https://github.com/lagoonitself/writey)** (MIT): Meta's handwriting engine and maths
+  layout are ported from Writey's `packages/inkscript` (glyph data, seeded jitter and `handLine`,
+  `textBox` / `writeText`, the LaTeX parser and `layoutMath`: fractions, scripts, ∫ with limits, √,
+  sized brackets; pen timing). Plain-JS port in `web/vendor/writey/` with its licence. The
+  Accept / Redo / Discard preview for written answers is Writey's idea too.
+- **EMS Allure** (SIL Open Font License 1.1, `web/vendor/writey/OFL.txt`) and the **Hershey fonts**
+  (via hersheytext, MIT): the glyph stroke data Meta writes with.
+- **[PenEcho](https://github.com/erickong/penecho)**: inspired the pause suggestions (chips by the pen
+  when you stop writing). No PenEcho code is used.
