@@ -46,7 +46,8 @@ def test_hint_level_3_ghost_and_underline():
     assert body["first_wrong"] == "L2"
     assert {"kind": "underline", "target": "L3"} in body["annotations"]
     ghost = next(a for a in body["annotations"] if a["kind"] == "ghost")
-    assert ghost == {"kind": "ghost", "after": "L2", "text": "= x sin x - ∫ sin x dx"}
+    assert ghost == {"kind": "ghost", "after": "L2", "text": "= x sin x - ∫ sin x dx",
+                     "latex": "= x \\sin{\\left(x \\right)} - \\int \\sin{\\left(x \\right)}\\, dx"}
     assert "write" not in kinds(body)
 
 
@@ -126,7 +127,7 @@ def test_level_3_nudge_names_technique_and_ghosts_next_step():
     note = next(a for a in body["annotations"] if a["kind"] == "note")
     ghost = next(a for a in body["annotations"] if a["kind"] == "ghost")
     assert note["text"] == "Try a u-substitution"
-    assert ghost == {"kind": "ghost", "after": "L1", "text": "= e^(x^2) + C"}
+    assert ghost == {"kind": "ghost", "after": "L1", "text": "= e^(x^2) + C", "latex": "= e^{x^{2}} + C"}
 
 
 def test_ln_abs_line_gets_tick():

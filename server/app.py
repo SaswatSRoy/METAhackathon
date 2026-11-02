@@ -103,7 +103,7 @@ class AssistRequest(BaseModel):
     # Boxes of the student's handwritten rows, top to bottom, measured on the page. More exact
     # than the boxes a vision model guesses, and a fallback when it gives none.
     ink_rows: list[list[float]] = Field(default_factory=list, max_length=100)
-    mode: Literal["hint", "answer", "check", "typeset", "graph", "auto"] = "auto"
+    mode: Literal["hint", "answer", "check", "typeset", "graph", "next", "why", "auto"] = "auto"
     hint_level: int = 1
     # Line history for the decision router (ROUTER_*); ignored when the router is off.
     hints_given: int = Field(default=0, ge=0, le=20)

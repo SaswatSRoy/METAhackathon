@@ -402,3 +402,30 @@ body.on-shelf .trace { display: none; }
 .mic[aria-pressed="true"] { background: #d0452b; border-color: #d0452b; color: #fff; }
 .mic[aria-pressed="true"] .orb { background: #fff; color: #d0452b; }
 .mic[data-state="transcribing"] .orb { animation: breathe 1.2s ease-in-out infinite; }
+/* Meta's pen strokes (Writey engine): previews, read labels, Accept / Redo / Discard pills */
+.meta-layer .read .ink-stroke { stroke: #9aa3ad; opacity: .9; }
+.meta-layer .pending .ink-stroke { opacity: .34; }
+.meta-layer .pending path.shade { opacity: .34; }
+.meta-ui { position: absolute; left: 0; top: 0; width: 0; height: 0; z-index: 4; }
+.page.meta-hidden .meta-ui { display: none; }
+.meta-pills { position: absolute; display: flex; gap: 4px; transform-origin: left top; animation: fadein .25s ease-out; }
+.meta-pills button {
+  font: 500 11.5px/1 Inter, system-ui, sans-serif; height: 24px; padding: 0 10px; border-radius: 12px;
+  border: 1px solid rgba(208,69,43,.28); background: rgba(255,253,248,.96); color: #a8341d; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(60,40,20,.08);
+}
+.meta-pills button[data-act="accept"] { background: var(--meta); border-color: var(--meta); color: #fff; }
+.meta-pills button:hover { filter: brightness(.96); }
+.meta-pills button[data-act="discard"] { color: #7d756c; border-color: #ddd6c8; }
+
+/* Pause suggestions: small ranked chips by the pen when the student stops writing */
+.suggest { position: absolute; display: flex; gap: 5px; z-index: 4; transform-origin: left top; transition: opacity .4s; }
+.suggest.gone { opacity: 0; pointer-events: none; }
+.suggest button {
+  font: 500 11.5px/1 Inter, system-ui, sans-serif; height: 24px; padding: 0 10px; border-radius: 12px;
+  border: 1px solid #e3dccf; background: rgba(255,253,248,.94); color: #5d564d; cursor: pointer;
+  box-shadow: 0 1px 3px rgba(60,40,20,.07); animation: fadein .3s ease-out both;
+}
+.suggest button:first-child { border-color: rgba(208,69,43,.3); color: #a8341d; }
+.suggest button:hover { background: #fff; }
+.page.meta-hidden .suggest { display: none; }

@@ -460,6 +460,28 @@ def latex_of(line: ParsedLine) -> str:
     return ("= " if line.continuation else "") + " = ".join(bits)
 
 
+def _latex_escape(t: str) -> str:
+    return re.sub(r"([\\{}$&#%_^~])", r"\\\1", t)
+
+
+def latex_for_text(text: str) -> str:
+    """LaTeX for an ink line written by the server (a `write`/`ghost` step).
+
+    Keeps a leading "= " and a trailing "+ C". A part SymPy cannot read on its own (e.g.
+    `f'(x)` without its definition line) is kept as \\text{...}, so the result is never empty.
+    """
+    p = parse_line(text)
+    if p.ok:
+        return latex_of(p)
+    body = text.strip()
+    lead = body.startswith("=")
+    bits = []
+    for raw in (body[1:] if lead else body).split("="):
+        q = parse_line(raw.strip())
+        bits.append(latex_of(q) if q.ok and not q.continuation else rf"\text{{{_latex_escape(raw.strip())}}}")
+    return ("= " if lead else "") + " = ".join(bits)
+
+
 # --------------------------------------------------------------------------- comparisons
 
 

@@ -1,6 +1,10 @@
 // Meta's ink: renders /api/assist annotations as handwriting on their own SVG layer.
+// Words and maths are real pen strokes from Writey's handwriting engine (./handwriting.js),
+// animated stroke by stroke; the Caveat font is only a fallback if the engine throws.
 import { PAGE_W, PAGE_H, RULE, MARGIN_X, rowY, rowAt, baselineOf, overlap, inBox } from './ink.js';
 import { authClient } from './store.js';
+import { mathBox, textBox, lineBox, paragraph, toLatex, isMath, pathD, penTimes, penWidth, emFor, newSeed } from './handwriting.js';
+import { splitRows } from './vendor/writey/latex.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const FONT = 'Caveat';
@@ -51,6 +55,10 @@ function cleanMarkup(g) {
   c.querySelectorAll('.ink-stroke').forEach(n => n.removeAttribute('style'));
   return c.innerHTML;
 }
+// The words a mark says, for tests, screen readers and "I read" checks.
+export function markText(g) {
+  return [...g.querySelectorAll('[data-text], text')].map(n => n.getAttribute('data-text') ?? n.textContent).filter(Boolean).join(' ');
+}
 
 // Clean typeset maths: Latin letters in italic (variables), function names and digits upright.
 export const MATH_FONT = '"STIX Two Text", "Cambria Math", "Times New Roman", serif';
@@ -68,39 +76,43 @@ const mathFont = (px, it) => `${it ? 'italic ' : ''}400 ${px}px ${MATH_FONT}`;
 const measureMath = (text, px) => mathRuns(text).reduce((w, r) => { mctx.font = mathFont(px, r.it); return w + mctx.measureText(r.t).width; }, 0);
 
 // Paints Meta's ink onto a 2D canvas (PNG/PDF export, thumbnails). `marks` is serialized data.
+// Handwriting is stored as the same stroke paths the page shows, so exports match the screen.
 export const META_COLOR = '#d0452b';
+const READ_COLOR = '#9aa3ad';
 export function paintMeta(ctx, marks = []) {
   const root = document.createElementNS(NS, 'svg');
   for (const d of marks) {
     const g = svgEl('g', {}, root);
     g.innerHTML = d.html;
-    const ghost = d.kind === 'ghost';
+    const ghost = d.kind === 'ghost' && !g.querySelector('path.ink-stroke');       // older pages: ghost text
+    const faint = d.pending ? 0.34 : 1;
+    const color = d.kind === 'read' ? READ_COLOR : META_COLOR;
     for (const p of g.querySelectorAll('path.shade')) {
-      ctx.save(); ctx.fillStyle = META_COLOR; ctx.globalAlpha = +p.getAttribute('fill-opacity') || 0.14;
+      ctx.save(); ctx.fillStyle = META_COLOR; ctx.globalAlpha = (+p.getAttribute('fill-opacity') || 0.14) * faint;
       ctx.fill(new Path2D(p.getAttribute('d'))); ctx.restore();
     }
     for (const p of g.querySelectorAll('path.ink-stroke')) {
       ctx.save();
-      ctx.globalAlpha = +(p.getAttribute('opacity') ?? 0.92) || 0.92; ctx.strokeStyle = META_COLOR; ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.globalAlpha = (+(p.getAttribute('opacity') ?? 0.92) || 0.92) * faint; ctx.strokeStyle = color; ctx.lineCap = ctx.lineJoin = 'round';
       ctx.lineWidth = +p.getAttribute('stroke-width') || 2.4;
       const dash = p.getAttribute('stroke-dasharray');
       if (dash) ctx.setLineDash(dash.split(/[\s,]+/).map(Number));
       ctx.stroke(new Path2D(p.getAttribute('d')));
       ctx.restore();
     }
-    for (const t of g.querySelectorAll('text')) {
+    for (const t of g.querySelectorAll('text')) {                 // Caveat fallback and older pages
       ctx.save();
       const x = +t.getAttribute('x'), y = +t.getAttribute('y');
       const rot = /rotate\(([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\)/.exec(t.parentNode.getAttribute?.('transform') || '');
       if (rot) { ctx.translate(+rot[2], +rot[3]); ctx.rotate(+rot[1] * Math.PI / 180); ctx.translate(-rot[2], -rot[3]); }
-      if (t.classList.contains('read-label')) { ctx.font = '500 10.5px Inter, sans-serif'; ctx.fillStyle = '#9aa3ad'; ctx.fillText(t.textContent, x, y); }
+      if (t.classList.contains('read-label')) { ctx.font = '500 10.5px Inter, sans-serif'; ctx.fillStyle = READ_COLOR; ctx.fillText(t.textContent, x, y); }
       else if (t.classList.contains('typeset')) {
         const px = +t.getAttribute('font-size') || 24;
         ctx.fillStyle = META_COLOR;
         let cx = x;
         for (const r of mathRuns(t.textContent)) { ctx.font = mathFont(px, r.it); ctx.fillText(r.t, cx, y); cx += ctx.measureText(r.t).width; }
       } else {
-        ctx.font = `600 ${t.getAttribute('font-size') || 30}px ${FONT}, cursive`; ctx.fillStyle = META_COLOR; ctx.globalAlpha = ghost ? 0.32 : +(t.getAttribute('opacity') ?? 1);
+        ctx.font = `600 ${t.getAttribute('font-size') || 30}px ${FONT}, cursive`; ctx.fillStyle = META_COLOR; ctx.globalAlpha = (ghost ? 0.32 : +(t.getAttribute('opacity') ?? 1)) * faint;
         ctx.fillText(t.textContent, x, y);
       }
       ctx.restore();
@@ -119,11 +131,14 @@ export async function assist(payload, timeoutMs = 45000) {
 }
 
 export class MetaInk {
-  constructor(svg, nb, { onReveal, onNoteTap } = {}) {
-    Object.assign(this, { svg, nb, onReveal, onNoteTap });
+  constructor(svg, nb, { onReveal, onNoteTap, onRedo, onCommit } = {}) {
+    Object.assign(this, { svg, nb, onReveal, onNoteTap, onRedo, onCommit });
     this.marks = []; this.run = 0; this.n = 0; this.byId = new Map();
     svg.setAttribute('viewBox', `0 0 ${PAGE_W} ${PAGE_H}`);
     this.defs = svgEl('defs', {}, svg);
+    // Accept / Redo / Discard pills for ink shown as a preview; HTML so they are real buttons.
+    this.ui = Object.assign(document.createElement('div'), { className: 'meta-ui' });
+    svg.after(this.ui);
   }
 
   // ---- layer management ------------------------------------------------------
@@ -140,6 +155,7 @@ export class MetaInk {
     const gone = this.marks;
     this.marks = [];
     for (const m of gone) { m.g.classList.add('fade'); m.t = setTimeout(() => m.g.remove(), 380); }
+    this.syncPills();
     return gone.length;
   }
   // Fade out only the marks of the given kinds, so tidy-ups and graphs survive a new hint.
@@ -148,25 +164,36 @@ export class MetaInk {
     const gone = this.marks.filter(m => kinds.has(m.kind));
     this.marks = this.marks.filter(m => !kinds.has(m.kind));
     for (const m of gone) { m.g.classList.add('fade'); m.t = setTimeout(() => m.g.remove(), 380); }
+    this.syncPills();
   }
   erase({ x, y }, R) {
     const hit = this.marks.filter(m => m.boxes.some(b => inBox(b, x, y, R / 2)) || m.pts.some(([px, py]) => Math.hypot(px - x, py - y) < R + 3));
     for (const m of hit) { m.g.remove(); this.marks.splice(this.marks.indexOf(m), 1); }
+    if (hit.length) this.syncPills();
     return hit.length > 0;
   }
 
-  // ---- undo snapshots (see Notebook.ext) -----------------------------------------
-  save() { return this.marks.slice(); }
+  // ---- undo snapshots (see Notebook.ext): the marks, and which were still previews ----------
+  save() { return this.marks.map(m => ({ m, pending: !!m.pending })); }
   load(list = []) {
     this.run++;
-    for (const m of this.marks) if (!list.includes(m)) m.g.remove();
-    for (const m of list) { clearTimeout(m.t); m.g.classList.remove('fade'); this.svg.append(m.g); }
-    this.marks = [...list];
+    const ms = list.map(e => e.m || e);
+    for (const m of this.marks) if (!ms.includes(m)) m.g.remove();
+    for (const e of list) {
+      const m = e.m || e;
+      if (e.m) this.setPending(m, e.pending);
+      clearTimeout(m.t); m.g.classList.remove('fade'); this.svg.append(m.g);
+    }
+    this.marks = [...ms];
+    this.syncPills();
   }
 
   // ---- persistence: marks as plain JSON (finished SVG markup + hit boxes) ----------
   serialize() {
-    return this.marks.map(m => ({ kind: m.kind, html: cleanMarkup(m.g), boxes: m.boxes, pts: m.pts.map(([x, y]) => [Math.round(x), Math.round(y)]), note: m.note || null }));
+    return this.marks.map(m => ({
+      kind: m.kind, html: cleanMarkup(m.g), boxes: m.boxes, pts: m.pts.map(([x, y]) => [Math.round(x), Math.round(y)]), note: m.note || null,
+      ...(m.pending ? { pending: true, pid: m.pid, ask: m.ask || null } : {}),
+    }));
   }
   // Replace the layer with stored marks (switching pages, reload). Drops everything in flight.
   restore(data = []) {
@@ -179,8 +206,10 @@ export class MetaInk {
       const m = this.mark(d.kind);
       m.g.innerHTML = d.html;
       m.boxes = d.boxes || []; m.pts = d.pts || []; m.note = d.note || null;
+      if (d.pending) { m.pid = d.pid; m.ask = d.ask; this.setPending(m, true); }
       if (m.note) this.makeTappable(m);
     }
+    this.syncPills();
   }
   makeTappable(m) {
     if (!this.onNoteTap || m.g.classList.contains('tap-target')) return;
@@ -204,6 +233,52 @@ export class MetaInk {
     return r;
   }
 
+  // ---- previews: Accept / Redo / Discard -------------------------------------------
+  setPending(m, on) { m.pending = !!on; m.g.classList.toggle('pending', !!on); }
+  pending() { return this.marks.filter(m => m.pending); }
+  syncPills() {
+    this.ui.replaceChildren();
+    const groups = new Map();
+    for (const m of this.pending()) { if (!groups.has(m.pid)) groups.set(m.pid, []); groups.get(m.pid).push(m); }
+    for (const [pid, ms] of groups) {
+      if (pid === this.redoing) continue;
+      const boxes = ms.flatMap(m => m.boxes);
+      if (!boxes.length) continue;
+      const last = boxes.reduce((a, b) => (b[1] + b[3] > a[1] + a[3] ? b : a));
+      const k = 1 / Math.max(0.3, this.nb.scale || 1), W = 196 * k;
+      let x = last[0] + last[2] + 14, y = last[1] + last[3] / 2 - 13 * k;
+      if (x + W > PAGE_W - 8) { x = clamp(Math.min(...boxes.map(b => b[0])), 8, PAGE_W - W - 8); y = Math.max(...boxes.map(b => b[1] + b[3])) + 6; }
+      const bar = Object.assign(document.createElement('div'), { className: 'meta-pills' });
+      bar.dataset.pid = pid;
+      Object.assign(bar.style, { left: `${x}px`, top: `${y}px`, transform: `scale(${k})` });
+      bar.addEventListener('pointerdown', e => e.stopPropagation());
+      for (const [act, label, title] of [['accept', 'Accept', 'Keep this ink'], ['redo', 'Redo', 'Ask Meta again'], ['discard', 'Discard', 'Remove this ink']]) {
+        const b = Object.assign(document.createElement('button'), { type: 'button', textContent: label, title });
+        b.dataset.act = act;
+        b.onclick = e => { e.stopPropagation(); this.decide(pid, act); };
+        bar.append(b);
+      }
+      this.ui.append(bar);
+    }
+  }
+  decide(pid, act) {
+    const ms = this.marks.filter(m => m.pending && m.pid === pid);
+    if (!ms.length) return;
+    if (act === 'redo') {                              // pills hide while Meta writes it again
+      this.redoing = pid; this.syncPills();
+      Promise.resolve(this.onRedo?.(ms[0].ask || null)).finally(() => { this.redoing = null; this.syncPills(); });
+      return;
+    }
+    this.nb.checkpoint();                              // Accept and Discard are undoable
+    if (act === 'accept') for (const m of ms) this.setPending(m, false);
+    else {
+      for (const m of ms) { m.g.classList.add('fade'); m.t = setTimeout(() => m.g.remove(), 380); }
+      this.marks = this.marks.filter(m => !ms.includes(m));
+    }
+    this.syncPills();
+    this.onCommit?.(act);
+  }
+
   // ---- primitives --------------------------------------------------------------
   tween(ms, fn, token) {
     return new Promise(res => {
@@ -223,7 +298,49 @@ export class MetaInk {
     p.style.strokeDasharray = `${len} ${len}`;
     await this.tween(ms, t => { p.style.strokeDashoffset = len * (1 - ease(t)); }, token);
   }
-  // Text revealed left to right through a growing clip rect, with a moving nib.
+
+  // Pen strokes for a box from the handwriting engine (em units), written at (x, base) with
+  // 1 em = `em` px, stroke by stroke at a person's pace, at most `maxMs` for the whole box.
+  async hand(m, box, x, base, em, token, { label = '', attrs = {}, maxMs = 2500, speed = 1, instant = false, reveal = true, width } = {}) {
+    const g = svgEl('g', { class: 'hw', 'data-text': label }, m.g);
+    const w = (width ?? penWidth(em)).toFixed(2);
+    const els = box.paths.map(p => svgEl('path', { d: pathD(p, em, x, base), class: 'ink-stroke', 'stroke-width': w, ...attrs }, g));
+    const rect = [x - 4, base - box.h * em - 3, box.w * em + 8, (box.h + box.d) * em + 6];
+    m.boxes.push(rect);
+    if (reveal) this.onReveal?.(rect);
+    if (instant || !els.length || token !== this.run) return rect;
+    const { times, end } = penTimes(box.paths.map(p => p.map((v, i) => (i % 2 ? base : x) + v * em)), { speed });
+    const total = Math.min(end, maxMs), k = end / total;
+    const lens = els.map(e => e.getTotalLength() + 0.5), done = els.map(() => -1);
+    els.forEach((e, i) => { e.style.strokeDasharray = `${lens[i]} ${lens[i]}`; e.style.strokeDashoffset = lens[i]; });
+    const nib = svgEl('circle', { r: 1.8, class: 'nib', cx: -9, cy: -9 }, m.g);
+    await this.tween(total, t => {
+      const now = t * total * k;
+      for (let i = 0; i < els.length; i++) {
+        const { at, dur } = times[i];
+        const f = now >= at + dur ? 1 : now <= at ? 0 : (now - at) / dur;
+        if (f === done[i]) continue;
+        done[i] = f;
+        els[i].style.strokeDashoffset = lens[i] * (1 - f);
+        if (f > 0 && f < 1) { const q = els[i].getPointAtLength(lens[i] * f); nib.setAttribute('cx', q.x); nib.setAttribute('cy', q.y); }
+      }
+    }, token);
+    els.forEach(e => e.removeAttribute('style'));
+    nib.remove();
+    return rect;
+  }
+  // Builds a handwriting box; on any engine error returns null so the caller falls back to Caveat.
+  box_(fn) {
+    const good = b => b && Array.isArray(b.paths) && Number.isFinite(b.w);
+    try { const b = fn(); return Array.isArray(b) ? (b.length && b.every(good) ? b : null) : good(b) ? b : null; }
+    catch (err) { console.warn('[margin] handwriting engine failed, using the font', err); return null; }
+  }
+  // One line of ink: engine strokes, or the Caveat font if the engine could not lay it out.
+  async inkLine(m, box, text, x, base, em, token, opts = {}) {
+    if (box) return this.hand(m, box, x, base, em, token, { label: text, ...opts });
+    return this.write(m, text, x, base, Math.round(em * 0.9), token);
+  }
+  // Text revealed left to right through a growing clip rect, with a moving nib (Caveat fallback).
   async write(m, text, x, base, px, token) {
     const w = measure(text, px);
     const box = [x - 4, base - px * 0.8, w + 8, px * 1.05];
@@ -248,6 +365,7 @@ export class MetaInk {
     }, token);
     rect.setAttribute('width', w + 16);
     nib.remove();
+    return box;
   }
   arrow(from, to, ctrl) {
     const pts = [];
@@ -265,9 +383,17 @@ export class MetaInk {
   // ---- annotations -------------------------------------------------------------
   box(id) { const b = this.byId.get(id)?.bbox; return Array.isArray(b) && b.length === 4 ? b : null; }
   lastBox() { return [...this.byId.values()].map(l => l.bbox).filter(b => b?.length === 4).sort((a, b) => (a[1] + a[3]) - (b[1] + b[3])).at(-1) || null; }
-  sizeFor(b, k = 0.95) { return Math.round(clamp((b?.[3] ?? 32) * k, 26, 40)); }   // Meta writes as big as the student
+  emFor(b) { return emFor(b?.[3] ?? 32); }                            // Meta writes as big as the student
 
-  async render(resp, sentLines) {
+  // Rows a box needs and where its baseline goes when it starts on ruled row r.
+  rowsFor(box, em) {
+    const h = box.h * em, d = box.d * em;
+    if (h <= RULE - 4 && d <= 16) return { n: 1, base: r => baselineOf(r) };
+    const n = Math.max(1, Math.ceil((h + d + 6) / RULE));
+    return { n, base: r => rowY(r) - RULE + 2 + (n * RULE - (h + d)) / 2 + h };
+  }
+
+  async render(resp, sentLines, ask = null) {
     // Typeset and graph ink stack with hints; each kind of answer replaces only its own kind.
     const EXTRAS = new Set(['typeset', 'graph']);
     const kinds = new Set((resp.annotations || []).map(a => a.kind));
@@ -275,21 +401,18 @@ export class MetaInk {
     if (extrasOnly) this.clearKinds(kinds);
     else this.clearKinds(new Set(this.marks.map(m => m.kind).filter(k => !EXTRAS.has(k))));
     const token = this.run;
-    try { await document.fonts.load(`32px ${FONT}`); } catch { /* fallback font */ }
-    if ((resp.annotations || []).some(a => a.kind === 'typeset')) {
-      try { await Promise.all([document.fonts.load(mathFont(24, false)), document.fonts.load(mathFont(24, true))]); } catch { /* serif fallback */ }
-    }
     this.byId = new Map(sentLines.map(l => [l.id, l]));
     for (const l of resp.lines || []) this.byId.set(l.id, { ...this.byId.get(l.id), ...l, bbox: l.bbox?.length === 4 ? l.bbox : this.byId.get(l.id)?.bbox });
     this.writeRow = null;
-    this.tsAnns = (resp.annotations || []).filter(a => a.kind === 'typeset' && a.text && this.box(a.target));
+    this.ask = ask; this.pid = `p${Date.now().toString(36)}${++this.n}`;
+    this.tsAnns = (resp.annotations || []).filter(a => a.kind === 'typeset' && (a.text || a.latex) && this.box(a.target));
     this.tsPlan = null;                               // laid out when the first one is drawn (after the notes)
 
     // Show what Meta read for lines it read from handwriting, so misreads are easy to spot.
     const sentText = new Map(sentLines.map(l => [l.id, l.text]));
     for (const l of resp.lines || []) if (l.text && this.box(l.id) && sentText.get(l.id) !== l.text) this.readLabel(l);
 
-    const anns = [...(resp.annotations || [])];
+    const anns = [...(resp.annotations || [])].map(a => (a.kind === 'explain' ? { ...a, kind: 'note' } : a));
     const ticked = new Set(anns.filter(a => a.kind === 'tick').map(a => a.target));
     for (const l of resp.lines || []) if (l.status === 'ok' && !ticked.has(l.id)) anns.push({ kind: 'tick', target: l.id });
     const order = { tick: 0, circle: 1, underline: 2, note: 3, ghost: 4, write: 5, typeset: 6, graph: 7 };
@@ -300,14 +423,18 @@ export class MetaInk {
       try { await this[`a_${a.kind}`](a, token); } catch (err) { console.warn('[margin] skipped annotation', a, err); }
       await sleep(a.kind === 'tick' ? 40 : 140);
     }
+    if (token === this.run) this.syncPills();
     return todo.length;
   }
 
   readLabel(l) {
     const b = this.box(l.id), m = this.mark('read');
-    const t = svgEl('text', { x: b[0], y: b[1] + b[3] + 16, class: 'read-label' }, m.g);
+    const x = b[0], base = b[1] + b[3] + 17, em = 15;
+    const bx = this.box_(() => mathBox(`\\text{I read: }${toLatex(l.text)}`));
+    if (bx) { this.hand(m, bx, x, base, em, this.run, { label: `I read: ${l.text}`, instant: true, reveal: false, width: 1.1 }); return; }
+    const t = svgEl('text', { x, y: base - 1, class: 'read-label' }, m.g);
     t.textContent = `I read: ${l.text}`;
-    m.boxes.push([b[0], b[1] + b[3] + 7, Math.min(PAGE_W - b[0], 6 * (l.text.length + 8)), 12]);
+    m.boxes.push([x, b[1] + b[3] + 7, Math.min(PAGE_W - x, 6 * (l.text.length + 8)), 12]);
   }
 
   async a_tick(a, token) {
@@ -341,79 +468,152 @@ export class MetaInk {
     await this.stroke(m, pts, smoothPath(pts), 450, token, 2);
   }
 
+  // A note's lines as engine boxes (em), wrapped to `maxPx`. Maths inside the text is laid
+  // out as maths; text may hold several lines ("\n", why notes), and `latex` + `latex_line`
+  // replaces that line with the laid-out formula (no `latex_line`: the formula is added below).
+  noteLines(a, em, maxPx) {
+    const seed = newSeed();
+    const parts = String(a.text || '').split('\n').filter(t => t.trim());
+    const li = Number.isInteger(a.latex_line) && a.latex_line >= 0 && a.latex_line < parts.length ? a.latex_line : -1;
+    const out = [];
+    for (let i = 0; i < parts.length; i++) {
+      let got = null;
+      if (i === li && a.latex) {
+        const mb = this.box_(() => mathBox(a.latex, seed + i));
+        if (mb) got = [mb];
+      }
+      got ??= this.box_(() => paragraph(parts[i], maxPx / em, seed + i));
+      if (!got) return null;
+      out.push(...got);
+    }
+    if (a.latex && li < 0 && !/\$/.test(a.text)) { const mb = this.box_(() => mathBox(a.latex, seed + 99)); if (mb) out.push(mb); }
+    return out;
+  }
+
   async a_note(a, token) {
     if (!a.text) return;
     const b = this.box(a.target) || this.lastBox();
     const m = this.mark('note');
-    const px = this.sizeFor(b);
+    m.g.setAttribute('aria-label', a.text);
+    const em = this.emFor(b), px = Math.round(em * 0.9), lead = em * 1.2;
+    const fontLines = maxPx => String(a.text).split('\n').flatMap(t => wrap(t, px, maxPx)).map(t => ({ t, box: null, w: measure(t, px) }));
+    const linesFor = maxPx => this.noteLines(a, em, maxPx)?.map(bx => ({ t: '', box: bx, w: bx.w * em })) || fontLines(maxPx);
+    const writeAll = async (lines, x, bases) => {
+      const budget = 2300 / lines.length;
+      for (let i = 0; i < lines.length && token === this.run; i++) {
+        const L = lines[i], text = L.box ? (i === 0 ? a.text : '') : L.t;
+        if (L.box) await this.hand(m, L.box, x, bases[i], em, token, { label: text, maxMs: budget });
+        else await this.write(m, L.t, x, bases[i], px, token);
+      }
+    };
     if (!b) {                                         // nothing on the page to point at
-      const r = this.freeRow(1, MARGIN_X + 40, measure(a.text, px));
-      return this.write(m, a.text, MARGIN_X + 40, baselineOf(r), px, token);
+      const x = MARGIN_X + 40, lines = linesFor(PAGE_W - 28 - x);
+      const r = this.freeRow(1, x, Math.max(...lines.map(l => l.w)), lines.length);
+      return writeAll(lines, x, lines.map((_, i) => baselineOf(r + i)));
     }
-    const right = b[0] + b[2] + 60, avail = PAGE_W - 28 - right, full = measure(a.text, px);
+    const right = b[0] + b[2] + 60, avail = PAGE_W - 28 - right;
     let lines, x, bases, from, to, ctrl;
-    const rightLines = avail > 60 ? wrap(a.text, px, avail) : [];
-    const rightFree = rightLines.length && this.isFree([right - 30, b[1] - 4, Math.max(...rightLines.map(l => measure(l, px))) + 30, rightLines.length * px * 1.02 + 8]);
+    const rightLines = avail > 60 ? linesFor(avail) : [];
+    const rightW = rightLines.length ? Math.max(...rightLines.map(l => l.w)) : 0;
+    const rightH = rightLines.reduce((h, l) => h + (l.box ? Math.max(lead, (l.box.h + l.box.d + 0.25) * em) : lead), 0);
+    const rightFree = rightLines.length && this.isFree([right - 30, b[1] - 4, rightW + 30, rightH + 8]);
+    const full = rightLines.reduce((s, l) => s + l.w, 0);
     if (a.side !== 'below' && avail >= Math.min(full, 220) && rightFree) {
       lines = rightLines; x = right;
       const base = b[1] + b[3] * 0.75;
-      bases = lines.map((_, i) => base + i * px * 1.02);
-      from = [x - 10, base - px * 0.35]; to = [b[0] + b[2] + 22, b[1] + b[3] * 0.45]; ctrl = [(from[0] + to[0]) / 2, Math.min(from[1], to[1]) - 18];
+      bases = [base];
+      for (let i = 1; i < lines.length; i++) {
+        const p = lines[i - 1].box, q = lines[i].box;
+        bases.push(bases[i - 1] + (p && q ? Math.max(lead, (p.d + q.h + 0.25) * em) : lead));
+      }
+      from = [x - 10, base - em * 0.3]; to = [b[0] + b[2] + 22, b[1] + b[3] * 0.45]; ctrl = [(from[0] + to[0]) / 2, Math.min(from[1], to[1]) - 18];
     } else {
       x = clamp(b[0] + 30, MARGIN_X + 20, PAGE_W - 300);
-      lines = wrap(a.text, px, PAGE_W - 28 - x);
-      const r = this.freeRow(rowAt(b[1] + b[3]) + 1, x - 30, Math.max(...lines.map(l => measure(l, px))) + 30, lines.length);
-      bases = lines.map((_, i) => baselineOf(r + i));
-      from = [x - 12, bases[0] - px * 0.4]; to = [b[0] - 8, b[1] + b[3] * 0.6]; ctrl = [b[0] - 34, from[1] - 6];   // curl up the left edge
+      lines = linesFor(PAGE_W - 28 - x);
+      const fits = lines.map(l => l.box ? this.rowsFor(l.box, em) : { n: 1, base: baselineOf });
+      const r = this.freeRow(rowAt(b[1] + b[3]) + 1, x - 30, Math.max(...lines.map(l => l.w)) + 30, fits.reduce((n, f) => n + f.n, 0));
+      let k = r;
+      bases = fits.map(f => { const y = f.base(k); k += f.n; return y; });
+      from = [x - 12, bases[0] - em * 0.35]; to = [b[0] - 8, b[1] + b[3] * 0.6]; ctrl = [b[0] - 34, from[1] - 6];   // curl up the left edge
     }
     const arr = this.arrow(from, to, ctrl);
-    await this.stroke(m, arr.pts, arr.d, 320, token, 2.2);
-    for (let i = 0; i < lines.length && token === this.run; i++) await this.write(m, lines[i], x, bases[i], px, token);
+    await this.stroke(m, arr.pts, arr.d, 280, token, 2.2);
+    await writeAll(lines, x, bases);
     m.note = { kind: 'note', target: a.target ?? null, text: a.text };
     this.makeTappable(m);                            // tap a hint to get a more specific one
   }
 
+  // Lines of a write/ghost: LaTeX rows when the server sent `latex`, else the text's own lines.
+  writeParts(a) {
+    const texts = String(a.text || '').split('\n').filter(s => s.trim());
+    if (a.latex) {
+      let rows = [];
+      try { rows = splitRows(a.latex); } catch { rows = [a.latex]; }
+      return rows.map((latex, i) => ({ text: rows.length === texts.length ? texts[i] : (i === 0 ? a.text || latex : ''), latex }));
+    }
+    return texts.map(text => ({ text, latex: isMath(text) ? toLatex(text) : null }));
+  }
+
+  // Answer steps / ghost of the next line: below `after`, each line on its own free row(s).
+  // They appear as a faint preview with Accept / Redo / Discard until the student decides.
   async a_write(a, token, ghost = false) {
-    if (!a.text) return;
+    if (!a.text && !a.latex) return;
     const after = this.box(a.after) || this.lastBox();
-    const x = after ? Math.max(MARGIN_X + 14, after[0]) : MARGIN_X + 40, px = this.sizeFor(after, 1);
+    const x = after ? Math.max(MARGIN_X + 14, after[0]) : MARGIN_X + 40, em0 = this.emFor(after);
+    const maxW = PAGE_W - 28 - x;
     let row = this.writeRow != null ? this.writeRow + 1 : after ? rowAt(after[1] + after[3]) + 1 : 1;
-    for (const part of String(a.text).split('\n').filter(s => s.trim())) {
-      for (const line of wrap(part, px, PAGE_W - 28 - x)) {
+    for (const part of this.writeParts(a)) {
+      // One engine box per line: maths laid out as maths; long sentences wrap.
+      let boxes = null, em = em0;
+      if (part.latex) {
+        const mb = this.box_(() => mathBox(part.latex));
+        if (mb) { em = Math.max(em0 * 0.6, Math.min(em0, maxW / Math.max(mb.w, 0.1))); boxes = [mb]; }
+      }
+      if (!boxes && part.text) boxes = this.box_(() => paragraph(part.text, maxW / em0));
+      const items = boxes ? boxes.map((bx, i) => ({ bx, text: i === 0 ? part.text : '' })) : wrap(part.text, Math.round(em0 * 0.9), maxW).map(t => ({ bx: null, text: t }));
+      for (const it of items) {
         if (token !== this.run) return;
-        row = this.freeRow(row, x, measure(line, px));
-        this.writeRow = row;
+        const fit = it.bx ? this.rowsFor(it.bx, em) : { n: 1, base: r => baselineOf(r) };
+        const w = it.bx ? it.bx.w * em : measure(it.text, Math.round(em * 0.9));
+        row = this.freeRow(row, x, w, fit.n);
+        this.writeRow = row + fit.n - 1;
         const m = this.mark(ghost ? 'ghost' : 'write');
-        await this.write(m, line, x, baselineOf(row), px, token);
-        row++;
+        m.pid = this.pid; m.ask = this.ask; this.setPending(m, true);
+        await this.inkLine(m, it.bx, it.text, x, fit.base(row), em, token);
+        row += fit.n;
       }
     }
   }
   a_ghost(a, token) { return this.a_write(a, token, true); }
 
-  // ---- typeset: the neat typed version of each line, in a clean serif ----
+  // ---- typeset: the neat copy of each line, its maths laid out properly (fractions, limits) ----
   // One column to the right of everything already on those lines (student ink, notes, circles)
   // when it fits; otherwise a "neat copy" block in the first free rows below the student's work.
+  // `text` keeps the student's own order (SymPy's `latex` may reorder terms), so it is preferred.
   planTypeset() {
     const items = this.tsAnns.map(a => {
-      const b = this.box(a.target), px = Math.round(clamp(b[3] * 0.78, 20, 27));
-      return { a, b, px, w: measureMath(a.text, px) };
+      const b = this.box(a.target);
+      const bx = this.box_(() => mathBox(a.text ? toLatex(a.text) : a.latex)) || (a.latex ? this.box_(() => mathBox(a.latex)) : null);
+      let em = Math.round(clamp(b[3] * 0.95, 22, 32));
+      if (bx) em = Math.min(em, (RULE + 8) / Math.max(0.5, bx.h + bx.d));
+      const px = Math.round(clamp(b[3] * 0.78, 20, 27));
+      return { a, b, bx, em, px, w: bx ? bx.w * em : measureMath(a.text || '', px), h: bx ? bx.h * em : px * 0.85 };
     });
     const plan = new Map();
     if (!items.length) return plan;
     const taken = [...this.metaBoxes(), ...this.nb.items.filter(it => !it.bg).flatMap(it => it.rowBoxes || [it.bbox])];
     const bandRight = b => Math.max(b[0] + b[2], ...taken.filter(r => r[1] < b[1] + b[3] + 2 && b[1] - 2 < r[1] + r[3] && r[0] < PAGE_W - 40).map(r => r[0] + r[2]));
     const colX = Math.max(...items.map(it => bandRight(it.b))) + 30;
-    const boxAt = (it, x, base) => [x - 4, base - it.px * 0.85, it.w + 8, it.px * 1.15];
+    const boxAt = (it, x, base) => [x - 4, base - it.h, it.w + 8, it.h + 8];
     if (items.every(it => colX + it.w <= PAGE_W - 24 && this.isFree(boxAt(it, colX, it.b[1] + it.b[3] * 0.78)))) {
-      for (const it of items) plan.set(it.a, { x: colX, base: it.b[1] + it.b[3] * 0.78, px: it.px, w: it.w });
+      for (const it of items) plan.set(it.a, { ...it, x: colX, base: it.b[1] + it.b[3] * 0.78 });
       return plan;
     }
     const x = clamp(Math.min(...items.map(it => it.b[0])), MARGIN_X + 14, PAGE_W - 24 - Math.max(...items.map(it => it.w)));
     const low = Math.max(...this.nb.lines().map(l => l.bbox[1] + l.bbox[3]), ...items.map(it => it.b[1] + it.b[3]));
     const r = this.freeRow(rowAt(low) + 1, x - 4, Math.max(160, ...items.map(it => it.w)) + 8, items.length + 1);
     plan.label = { x, base: baselineOf(r) - 6 };
-    items.forEach((it, i) => plan.set(it.a, { x, base: baselineOf(r + 1 + i), px: it.px, w: it.w }));
+    items.forEach((it, i) => plan.set(it.a, { ...it, x, base: baselineOf(r + 1 + i) }));
     return plan;
   }
 
@@ -426,15 +626,17 @@ export class MetaInk {
       this.tsPlan.labelDone = true;
       const lm = this.mark('typeset');
       const { x, base } = this.tsPlan.label;
-      const t = svgEl('text', { x, y: base, 'font-size': 18, opacity: 0.75 }, lm.g);
-      t.textContent = 'neat copy';
-      const w = measure('neat copy', 18);
-      const u = [[x, base + 5], [x + w * 0.5, base + 6.5], [x + w, base + 4.5]];
-      lm.boxes.push([x - 4, base - 16, w + 8, 24]);
+      const lb = this.box_(() => paragraph('neat copy', 100)[0]);
+      const w = lb ? lb.w * 19 : measure('neat copy', 18);
+      if (lb) await this.hand(lm, lb, x, base, 19, token, { label: 'neat copy', attrs: { opacity: 0.75 }, maxMs: 700, width: 1.4 });
+      else { const t = svgEl('text', { x, y: base, 'font-size': 18, opacity: 0.75 }, lm.g); t.textContent = 'neat copy'; lm.boxes.push([x - 4, base - 16, w + 8, 24]); }
+      const u = [[x, base + 6], [x + w * 0.5, base + 7.5], [x + w, base + 5.5]];
       await this.stroke(lm, u, smoothPath(u), 200, token, 1.4, { opacity: 0.5 });
     }
-    const { x, base, px, w } = p;
+    const { x, base, px, w, bx, em } = p;
     const m = this.mark('typeset');
+    if (bx) { await this.hand(m, bx, x, base, em, token, { label: a.text || a.latex, maxMs: Math.min(1100, 2600 / this.tsAnns.length), speed: 1.4 }); return; }
+    // Fallback: the serif font, revealed left to right.
     const box = [x - 4, base - px * 0.85, w + 8, px * 1.15];
     m.boxes.push(box);
     this.onReveal?.(box);
@@ -486,7 +688,9 @@ export class MetaInk {
     await this.stroke(m, xAxis, smoothPath(xAxis) + head(xAxis.at(-1), 'x'), 260, token, 1.5, { opacity: 0.55 });
     await this.stroke(m, yAxis, smoothPath(yAxis) + head(yAxis.at(-1), 'y'), 220, token, 1.5, { opacity: 0.55 });
     for (const [t, x, y] of [['x', R + 2, ax + 16], ['y', ay + 7, T - 2]]) {
-      const lt = svgEl('text', { x, y, 'font-size': 16, opacity: 0.7 }, m.g); lt.textContent = t;
+      const lb = this.box_(() => textBox(t));
+      if (lb) await this.hand(m, lb, x, y, 20, token, { label: t, attrs: { opacity: 0.7 }, maxMs: 100, reveal: false, width: 1.4 });
+      else { const lt = svgEl('text', { x, y, 'font-size': 16, opacity: 0.7 }, m.g); lt.textContent = t; }
     }
     const segs = graphSegments(pts, y0, y1).map(s => s.map(([x, y]) => [sx(x), sy(y)]));
     // shaded area for a definite integral
@@ -524,13 +728,21 @@ export class MetaInk {
       const two = ov.length > 1;
       const tx = two ? gx + 30 : gx + 4;
       if (two) { const sw = [[gx + 4, gy + 11], [gx + 24, gy + 11]]; await this.stroke(m, sw, smoothPath(sw), 120, token, 2.2, { opacity: 0.92, 'data-legend': 1 }); }
-      await this.write(m, cut(`y = ${a.fn}`, two ? 30 : 34), tx, gy + 16, 19, token);
+      await this.legend(m, `y = ${a.fn}`, cut(`y = ${a.fn}`, two ? 30 : 34), tx, gy + 16, gx + W - 4 - tx, token);
       if (two) {
         const sw = [[gx + 4, gy + 31], [gx + 24, gy + 31]];
         svgEl('path', { d: smoothPath(sw), class: 'ink-stroke', 'stroke-width': 1.7, 'stroke-dasharray': '6 5', opacity: 0.75 }, m.g);
-        await this.write(m, cut(a.overlay_fn ? `y = ${a.overlay_fn}` : 'overlay', 30), tx, gy + 36, 19, token);
+        const ol = a.overlay_fn ? `y = ${a.overlay_fn}` : 'overlay';
+        await this.legend(m, ol, cut(ol, 30), tx, gy + 36, gx + W - 4 - tx, token);
       }
     }
+  }
+  // A legend line (`y = x sin x`): handwritten maths shrunk to fit the plot's width.
+  async legend(m, text, short, x, base, maxW, token) {
+    const bx = this.box_(() => lineBox({ text }));
+    if (!bx) return this.write(m, short, x, base, 19, token);
+    const em = Math.max(13, Math.min(22, maxW / Math.max(bx.w, 0.1)));
+    return this.hand(m, bx, x, base, em, token, { label: text, maxMs: 600, speed: 1.6 });
   }
 }
 
