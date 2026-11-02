@@ -530,7 +530,7 @@ function closeCmd() {
   cmd.classList.remove('open'); cmd.hidden = true; cmdInput.blur(); voiceNote('');
 }
 function sendCmd() {
-  // Meta's engine only has the words once the mic is off: stop, let them land in the bar, Enter again sends.
+  // Meta's engine only has the words once the mic is off: stop, let them land in the bar, Enter or Send again sends.
   if (voice.on && voice.engine === 'meta') { voice.stop(); return; }
   voice.stop();
   const v = cmdInput.value.trim();
@@ -579,7 +579,7 @@ function showEngine() {
   vEngine.textContent = voice.engine === 'browser' ? 'Use Meta transcription' : 'Use browser speech';
 }
 const voice = new Voice({
-  onText: text => { openCmd(text, { focus: false }); },
+  onText: text => { if (voice.on || !cmd.hidden) openCmd(text, { focus: false }); },   // a late final result after Send must not reopen the bar
   onCommand: text => openCmd(text, { focus: false }),          // wake word: "Hey Meta, …" lands in the bar too
   onState: (s, detail) => {
     mic.dataset.state = s === 'on' ? 'listening' : s === 'transcribing' ? 'transcribing' : 'idle';
@@ -622,7 +622,7 @@ async function demo() {
   nb.lastPoint = { x: box.bbox[0] + box.bbox[2], y: box.bbox[1] + box.bbox[3] - 32 };
   dismissCoach();
   saveNow();
-  toast(touchOnly() ? 'Demo loaded. Tap the mic, then pick “Help me”.' : 'Demo loaded. Press / and pick “Help me”, or tap the mic and ask.');
+  toast(touchOnly() ? 'Demo loaded. Tap the mic, then ask or pick “Help me”.' : 'Demo loaded. Press / and pick “Help me”, or tap the mic and ask.');
 }
 
 // ---- server status ------------------------------------------------------------------------------

@@ -224,6 +224,17 @@ kbd {
 .cmd.open { transform: translate(-50%, 0); opacity: 1; }
 .cmd form { display: flex; align-items: center; gap: 10px; padding: 4px 8px 8px; }
 .cmd input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; font: 16px Inter, system-ui, sans-serif; color: var(--ui); -webkit-user-select: text; user-select: text; }
+.cmd .send { position: relative; flex: none; display: grid; place-items: center; border-radius: 6px; touch-action: manipulation; transition: transform .12s ease-out, opacity .15s; }
+.cmd .send svg { display: none; width: 18px; height: 18px; stroke-width: 2.2; }
+@media (hover: hover) and (pointer: fine) { .cmd .send:hover kbd { color: var(--ui); border-color: rgba(0,0,0,.22); } }
+@media (hover: none) {   /* touch has no Enter key: the ↵ hint becomes a real send button */
+  .cmd .send { width: 34px; height: 34px; margin: -3px -2px -3px 0; border-radius: 50%; background: var(--ui); color: #fff; }
+  .cmd .send::after { content: ""; position: absolute; inset: -6px; }   /* bigger touch target */
+  .cmd .send kbd { display: none; }
+  .cmd .send svg { display: block; }
+  .cmd .send:active { transform: scale(.92); }
+  .cmd input:placeholder-shown + .send { opacity: .3; pointer-events: none; }   /* nothing to send yet */
+}
 .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 2px; }
 .chips button { padding: 6px 12px; border-radius: 99px; font-size: 13px; border: 1px solid var(--hair); background: #faf8f4; color: #3a3a3f; }
 .chips button:hover { background: #fff; border-color: rgba(0,0,0,.16); }
