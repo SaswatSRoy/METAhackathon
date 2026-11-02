@@ -39,6 +39,8 @@
     <symbol id="i-lasso" viewBox="0 0 24 24"><path d="M12 4c4.4 0 8 2.3 8 5.3s-3.6 5.3-8 5.3-8-2.3-8-5.3S7.6 4 12 4z" stroke-dasharray="2.6 2.4"/><path d="M7.6 13.8c-1.6 1.2-1.4 2.9.3 3.5 1.6.6 1.4 2.3-.4 3.2"/></symbol>
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 15.5l-4.5-4.5-8 8"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></symbol>
+    <symbol id="i-suggest" viewBox="0 0 24 24"><path d="M12 4a5.5 5.5 0 0 0-3.2 10c.5.4.8 1 .8 1.6V17h4.8v-1.4c0-.6.3-1.2.8-1.6A5.5 5.5 0 0 0 12 4z"/><path d="M9.8 19.8h4.4"/></symbol>
+    <symbol id="i-wake" viewBox="0 0 24 24"><path d="M4.5 10.5v3"/><path d="M8.25 7.5v9"/><path d="M12 4.5v15"/><path d="M15.75 7.5v9"/><path d="M19.5 10.5v3"/></symbol>
   </svg>
 
   <section id="shelf" class="shelf" hidden>
@@ -46,7 +48,7 @@
       <div class="brand big"><span class="mark-logo"></span><b>Margin</b></div>
       <div class="shelf-actions">
         <button id="account-btn" class="toggle" title="Cloud account &amp; PostgreSQL sync"><i></i><span id="account-label">Sign in</span></button>
-        <button id="new-notebook" class="pill-btn"><svg><use href="#i-plus"/></svg><span>New notebook</span></button>
+        <button id="new-notebook" class="pill-btn" aria-label="New notebook"><svg><use href="#i-plus"/></svg><span>New notebook</span></button>
       </div>
     </header>
     <h1>Notebooks</h1>
@@ -107,8 +109,8 @@
     </div>
 
     <div class="right">
-      <button id="auto" class="toggle" aria-pressed="true" title="Suggest what Meta can do when I pause writing"><i></i><span>Suggestions</span></button>
-      <button id="wake" class="toggle" aria-pressed="false" title="Listen for “Hey Meta”"><i></i><span>Wake word</span></button>
+      <button id="auto" class="toggle" aria-pressed="true" aria-label="Suggestions" title="Suggest what Meta can do when I pause writing"><svg aria-hidden="true"><use href="#i-suggest"/></svg><i></i><span>Suggestions</span></button>
+      <button id="wake" class="toggle" aria-pressed="false" aria-label="Wake word" title="Listen for “Hey Meta”"><svg aria-hidden="true"><use href="#i-wake"/></svg><i></i><span>Wake word</span></button>
       <div class="menu-wrap">
         <button id="more" class="icon" title="More" aria-haspopup="true" aria-expanded="false"><svg><use href="#i-more"/></svg></button>
         <div id="menu" class="menu" hidden>
@@ -163,7 +165,10 @@
     </main>
   </div>
 
-  <div id="coach" class="coach">Write with the pen, or press <kbd>T</kbd> to type a line. Then press <kbd>/</kbd> or tap <b>Hey Meta</b>.</div>
+  <div id="coach" class="coach">
+    <span class="for-keys">Write with the pen, or press <kbd>T</kbd> to type a line. Then press <kbd>/</kbd> or tap the mic.</span>
+    <span class="for-touch">Write with the pen, or pick the <b>T</b> tool to type a line. Then tap the mic button to ask Meta.</span>
+  </div>
 
   <div id="trace" class="trace" hidden aria-live="polite"></div>
   <input id="pick-image" type="file" accept="image/*" hidden>

@@ -389,7 +389,8 @@ function dismissCoach() { $('#coach').classList.add('gone'); }
 page.addEventListener('pointerdown', dismissCoach, { once: true });
 
 // ---- calling Meta ------------------------------------------------------------------------
-let busy = false, hintMemo = null;
+let busy = false, hintMemo = null, noteTipShown = false;
+const touchOnly = () => matchMedia('(hover: none)').matches;
 
 function nextHintLevel(lines, sig, escalate) {
   if (!hintMemo) return 1;
@@ -434,6 +435,10 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
       // After a hint: offer "Why?" and the next step right by it.
       const note = resp.mode === 'hint' && meta.marks.find(m => m.kind === 'note');
       if (note && suggestOn()) { const b = note.boxes.at(-1); suggest.show(['why', 'next'], { x: b[0] + b[2] - 10, y: b[1] + b[3] + 22 }); }
+      if (hintMemo && !noteTipShown) {               // once per visit: hints get more specific on request
+        noteTipShown = true;
+        toast(touchOnly() ? 'Tap Meta’s note for a more specific hint.' : 'Click Meta’s note for a more specific hint.');
+      }
     }
   } catch (err) {
     console.warn('[margin] assist failed:', err);
@@ -617,7 +622,7 @@ async function demo() {
   nb.lastPoint = { x: box.bbox[0] + box.bbox[2], y: box.bbox[1] + box.bbox[3] - 32 };
   dismissCoach();
   saveNow();
-  toast('Demo loaded. Press / and pick “Help me”, or tap Hey Meta.');
+  toast(touchOnly() ? 'Demo loaded. Tap the mic, then pick “Help me”.' : 'Demo loaded. Press / and pick “Help me”, or tap the mic and ask.');
 }
 
 // ---- server status ------------------------------------------------------------------------------

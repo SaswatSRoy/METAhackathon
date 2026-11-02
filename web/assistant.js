@@ -215,6 +215,9 @@ export class MetaInk {
     if (!this.onNoteTap || m.g.classList.contains('tap-target')) return;
     m.g.classList.add('tap-target');
     m.g.setAttribute('role', 'button');
+    m.g.setAttribute('tabindex', '0');
+    m.g.setAttribute('aria-label', `Meta’s hint: ${m.note.text}. Press for a more specific hint.`);
+    m.g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); this.onNoteTap(m.note); } });
     if (!m.g.querySelector('rect.hit') && m.boxes.length) {
       const pad = 6, xs = m.boxes.map(q => q[0]), ys = m.boxes.map(q => q[1]);
       svgEl('rect', { class: 'hit', x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, width: Math.max(...m.boxes.map(q => q[0] + q[2])) - Math.min(...xs) + 2 * pad, height: Math.max(...m.boxes.map(q => q[1] + q[3])) - Math.min(...ys) + 2 * pad, rx: 8 }, m.g);
@@ -414,7 +417,8 @@ export class MetaInk {
 
     const anns = [...(resp.annotations || [])].map(a => (a.kind === 'explain' ? { ...a, kind: 'note' } : a));
     const ticked = new Set(anns.filter(a => a.kind === 'tick').map(a => a.target));
-    for (const l of resp.lines || []) if (l.status === 'ok' && !ticked.has(l.id)) anns.push({ kind: 'tick', target: l.id });
+    // A tidy-up or a graph is not a marking: ticking only the right lines would hide the wrong one.
+    if (!extrasOnly) for (const l of resp.lines || []) if (l.status === 'ok' && !ticked.has(l.id)) anns.push({ kind: 'tick', target: l.id });
     const order = { tick: 0, circle: 1, underline: 2, note: 3, ghost: 4, write: 5, typeset: 6, graph: 7 };
     const todo = anns.filter(a => a.kind in order).sort((a, b) => order[a.kind] - order[b.kind]);
     if (!todo.length && resp.verdict) todo.push({ kind: 'note', target: null, text: resp.verdict });
