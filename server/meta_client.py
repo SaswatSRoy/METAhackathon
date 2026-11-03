@@ -184,14 +184,42 @@ def _client():
     return OpenAI(base_url=_working["base"] or base_url(), api_key=api_key(), timeout=30.0, max_retries=1)
 
 
+def diagnose() -> dict[str, Any]:
+    """What the Meta API says right now: the models this key can use, and one tiny text call and one
+    tiny image call with the model in use. No secrets in the answer."""
+    out: dict[str, Any] = {"base": _working["base"] or base_url(), "model": chat_model(), "offline": is_offline()}
+    client = _client()
+    if client is None:
+        return out
+    if not rate_limiter.allow():
+        out["busy"] = "rate limit reached, try again in a minute"
+        return out
+    try:
+        out["models"] = sorted(m.id for m in client.models.list())
+    except Exception as exc:
+        out["models_error"] = f"{getattr(exc, 'status_code', None) or type(exc).__name__}: {_err_detail(exc) or str(exc)[:120]}"
+    dot = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+    for name, content in (("text", "Reply with the word OK."),
+                          ("image", [{"type": "text", "text": "Reply with the word OK."},
+                                     {"type": "image_url", "image_url": {"url": dot}}])):
+        try:
+            r = client.chat.completions.create(model=chat_model(), max_tokens=400,
+                                               messages=[{"role": "user", "content": content}])
+            out[name] = f"ok: {(r.choices[0].message.content or '').strip()[:40]!r}"
+        except Exception as exc:
+            out[name] = f"{getattr(exc, 'status_code', None) or type(exc).__name__}: {_err_detail(exc) or str(exc)[:160]}"
+    return out
+
+
 def _err_detail(exc: Exception) -> str:
     """Meta's own short error message, if the reply had one."""
     body = getattr(exc, "body", None)
+    msg = None
     if isinstance(body, dict):
         msg = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else body.get("message")
-        if msg:
-            return str(msg)[:120]
-    return ""
+    elif isinstance(body, str) and body.strip():
+        msg = re.sub(r"<[^>]+>", " ", body)
+    return re.sub(r"\s+", " ", str(msg)).strip()[:120] if msg else ""
 
 
 def _complete(client, **kw):
@@ -205,6 +233,13 @@ def _complete(client, **kw):
             raise
         first = exc
     log.warning("Meta 404 for model %s at %s: %s", model, _working["base"] or base_url(), _err_detail(first) or "no body")
+    # Meta sometimes answers 404 for a moment even for a model that exists: try the same call once more.
+    time.sleep(1.0)
+    try:
+        return client.chat.completions.create(model=model, **kw)
+    except Exception as exc:
+        if getattr(exc, "status_code", None) != 404:
+            raise
     tries = []
     if (_working["base"] or base_url()).rstrip("/") != DEFAULT_BASE_URL and hasattr(client, "with_options"):
         tries.append((DEFAULT_BASE_URL, model))
@@ -372,8 +407,11 @@ def read_error_text(reason: str | None) -> str:
     if "too large" in r:
         return "the page picture was too big"
     if "error 404" in r:
-        return ("Meta couldn't find the model or the API address (check CHAT_MODEL and MODEL_BASE_URL "
-                "in the host's settings, or remove them)")
+        # Meta's own words, without the _ and ` that the handwriting would turn into subscripts
+        said = re.sub(r"[_`*^]", " ", (reason or "").split("(", 1)[1].rstrip(")")) if "(" in (reason or "") else ""
+        said = re.sub(r"\s+", " ", said).strip()
+        return ("Meta answered \"not found\" (404" + (f": {said}" if said else ", no details")
+                + "). It is often a short hiccup on Meta's side")
     if "error 5" in r:
         return "Meta's server had an error"
     if "connection" in r:
