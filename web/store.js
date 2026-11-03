@@ -93,6 +93,18 @@ function saveSessionState(next) {
   } catch { /* ignore */ }
 }
 
+function parseAuthError(data, status) {
+  const d = data?.detail;
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d) && d.length) {
+    const first = d[0];
+    const field = first?.loc?.at?.(-1);
+    const msg = first?.msg || 'Invalid input';
+    return field && typeof field === 'string' ? `${field[0].toUpperCase() + field.slice(1)}: ${msg}` : msg;
+  }
+  return `Authentication error (HTTP ${status})`;
+}
+
 export const authClient = {
   get user() { return sessionState?.user || null; },
   get accessToken() { return sessionState?.access_token || null; },
@@ -119,10 +131,10 @@ export const authClient = {
     const r = await fetch('/api/auth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, display_name: displayName }),
+      body: JSON.stringify({ email: email.trim(), password, display_name: displayName.trim() }),
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(parseAuthError(data, r.status));
     saveSessionState(data);
     return data.user;
   },
@@ -131,12 +143,25 @@ export const authClient = {
     const r = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email: email.trim(), password }),
     });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(parseAuthError(data, r.status));
     saveSessionState(data);
     return data.user;
+  },
+
+  async fetchMe() {
+    if (!this.isAuthenticated()) return null;
+    try {
+      const r = await this.fetchWithAuth('/api/auth/me');
+      if (!r.ok) return this.user;
+      const { user } = await r.json();
+      if (user && sessionState) saveSessionState({ ...sessionState, user: { ...sessionState.user, ...user } });
+      return this.user;
+    } catch {
+      return this.user;
+    }
   },
 
   async refresh() {
@@ -189,6 +214,12 @@ async function syncNotebookToCloud(nb) {
         method: 'POST',
         body: JSON.stringify({ id: nb.id, title: nb.title, color: nb.color, initial_page_id: nb.pages?.[0] }),
       });
+      if ((nb.pages?.length || 0) > 1) {
+        await authClient.fetchWithAuth(`/api/notebooks/${encodeURIComponent(nb.id)}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ pages: nb.pages }),
+        });
+      }
     }
   } catch (err) { console.warn('[margin] cloud notebook sync skipped', err); }
 }

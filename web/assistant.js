@@ -169,8 +169,8 @@ export async function assist(payload, timeoutMs = 45000) {
 // eraser, lasso, undo, save and export treat it like the student's ink. Only previews (answers / ghost
 // steps waiting for Accept) and the grey "I read" labels stay on the SVG layer, in `this.live`.
 export class MetaInk {
-  constructor(svg, nb, { onReveal, onRedo, onCommit, inkColor } = {}) {
-    Object.assign(this, { svg, nb, onReveal, onRedo, onCommit, inkColor });
+  constructor(svg, nb, { onReveal, onRedo, onCommit, onEditRead, inkColor } = {}) {
+    Object.assign(this, { svg, nb, onReveal, onRedo, onCommit, onEditRead, inkColor });
     this.live = []; this.run = 0; this.n = 0; this.byId = new Map();
     svg.setAttribute('viewBox', `0 0 ${PAGE_W} ${PAGE_H}`);
     this.defs = svgEl('defs', {}, svg);
@@ -303,16 +303,30 @@ export class MetaInk {
     }
     this.syncPills();
   }
-  makeTappable(m) {
-    if (!this.onNoteTap || m.g.classList.contains('tap-target')) return;
-    m.g.classList.add('tap-target');
-    m.g.setAttribute('role', 'button');
-    m.g.setAttribute('tabindex', '0');
-    m.g.setAttribute('aria-label', `Meta’s hint: ${m.note.text}. Press for a more specific hint.`);
-    m.g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); this.onNoteTap(m.note); } });
-    if (!m.g.querySelector('rect.hit') && m.boxes.length) {
-      const pad = 6, xs = m.boxes.map(q => q[0]), ys = m.boxes.map(q => q[1]);
-      svgEl('rect', { class: 'hit', x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, width: Math.max(...m.boxes.map(q => q[0] + q[2])) - Math.min(...xs) + 2 * pad, height: Math.max(...m.boxes.map(q => q[1] + q[3])) - Math.min(...ys) + 2 * pad, rx: 8 }, m.g);
+
+  // ---- baking: a finished mark becomes notebook items -------------------------------------
+  // A mark of plain pen strokes (words, maths, ticks, circles, arrows, plain graphs) becomes ONE 'ink'
+  // item holding every pen stroke as a seg, from the engine's point lists (the eraser still takes them
+  // one by one). Anything else (shaded or dashed graphs, the font fallback) becomes one 'mark' item
+  // holding its markup. Not undoable by itself: callers checkpoint.
+  bake(m, extra = {}) {
+    const color = this.color(), grp = `g${Date.now().toString(36)}${++this.n}`;
+    const paths = [...m.g.querySelectorAll('path.ink-stroke')];
+    const plain = paths.length && !m.g.querySelector('text, path.shade, [stroke-dasharray]') && paths.every(p => p._polys?.length);
+    const base = { by: 'meta', mk: m.kind, grp, ...(m.rid ? { rid: m.rid } : {}), ...extra };
+    let items;
+    if (plain) {
+      const segs = paths.flatMap(p => {
+        const op = p.getAttribute('opacity'), w = +p.getAttribute('stroke-width') || 2.4;
+        return p._polys.filter(poly => poly.length).map(poly => ({ p: poly.map(([x, y]) => [x, y]), w, ...(op != null ? { o: +op } : {}) }));
+      });
+      items = segs.length ? [{ type: 'ink', ...base, color, segs }] : [];
+    } else {
+      const html = cleanMarkup(m.g);
+      const bs = [...m.boxes, ...(m.pts.length > 1 ? [ptsBox(m.pts)] : [])];
+      if (!bs.length) { m.g.remove(); this.live = this.live.filter(x => x !== m); return []; }
+      const polys = paths.flatMap(p => p._polys || []).map(poly => poly.map(([x, y]) => [r1(x), r1(y)]));
+      items = [{ type: 'mark', ...base, html, box0: unionBox(bs), x: 0, y: 0, color, polys: polys.length ? polys : polysFromHtml(html) }];
     }
     if (!items.length) { m.g.remove(); this.live = this.live.filter(x => x !== m); return []; }
     const say = markText(m.g);
@@ -627,10 +641,25 @@ export class MetaInk {
     const b = this.box(l.id), m = this.mark('read');
     const x = b[0], base = b[1] + b[3] + 17, em = 15;
     const bx = this.box_(() => mathBox(`\\text{I read: }${toLatex(l.text)}`));
-    if (bx) { this.hand(m, bx, x, base, em, this.run, { label: `I read: ${l.text}`, instant: true, reveal: false, width: 1.1 }); return; }
-    const t = svgEl('text', { x, y: base - 1, class: 'read-label' }, m.g);
-    t.textContent = `I read: ${l.text}`;
-    m.boxes.push([x, b[1] + b[3] + 7, Math.min(PAGE_W - x, 6 * (l.text.length + 8)), 12]);
+    if (bx) {
+      this.hand(m, bx, x, base, em, this.run, { label: `I read: ${l.text}`, instant: true, reveal: false, width: 1.1 });
+    } else {
+      const t = svgEl('text', { x, y: base - 1, class: 'read-label' }, m.g);
+      t.textContent = `I read: ${l.text}`;
+      m.boxes.push([x, b[1] + b[3] + 7, Math.min(PAGE_W - x, 6 * (l.text.length + 8)), 12]);
+    }
+    if (this.onEditRead && m.boxes.length) {
+      const rb = unionBox(m.boxes);
+      m.g.classList.add('tap-target', 'read-edit');
+      m.g.setAttribute('role', 'button');
+      m.g.setAttribute('tabindex', '0');
+      m.g.setAttribute('title', `Meta read “${l.text}” — click to fix if misread`);
+      m.g.setAttribute('aria-label', `Meta read ${l.text}. Click to edit.`);
+      m.g.prepend(svgEl('rect', { class: 'hit', x: rb[0] - 4, y: rb[1] - 3, width: rb[2] + 8, height: rb[3] + 6, rx: 5 }));
+      const open = e => { if (e.pointerType === 'pen') return; e.stopPropagation(); this.onEditRead(l, this.ask); };
+      m.g.addEventListener('click', open);
+      m.g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } });
+    }
   }
 
   async a_tick(a, token) {

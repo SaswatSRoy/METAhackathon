@@ -3,21 +3,27 @@ import { PAGE_W, PAGE_H, prepareItem, paintItems, normalizeItem } from './ink.js
 import { paintMeta } from './assistant.js';
 import { loadItemImages } from './images.js';
 
-const PAPER = '#fcf9f2', RULE_C = '#cddbea', GRID_C = '#dfe6ee', MARGIN_C = '#e6a29c';
+const PALETTES = {
+  daylight: { paper: '#fcf9f2', rule: '#cddbea', grid: '#dfe6ee', margin: '#e6a29c' },
+  sepia:    { paper: '#f5eedc', rule: '#d8ccb2', grid: '#dfd5be', margin: '#d68f84' },
+  night:    { paper: '#1b1f2a', rule: '#2a3346', grid: '#252d3f', margin: '#783f47' },
+};
 
 // Paper drawn in device pixels so rules stay crisp and even at any zoom (no moiré).
 export function paintPaper(c, paper = 'ruled') {
+  const theme = c.canvas?.id === 'paper' ? document.documentElement.dataset.theme : 'daylight';
+  const pal = PALETTES[theme] || PALETTES.daylight;
   const r = c.getTransform().a || 1, lw = Math.max(1, Math.round(r));
   const W = Math.round(PAGE_W * r), H = Math.round(PAGE_H * r), top = Math.round(100 * r);
   c.save();
   c.setTransform(1, 0, 0, 1, 0, 0);
-  c.fillStyle = PAPER; c.fillRect(0, 0, W, H);
+  c.fillStyle = pal.paper; c.fillRect(0, 0, W, H);
   if (paper === 'ruled') {
-    c.fillStyle = RULE_C;
+    c.fillStyle = pal.rule;
     for (let y = 132; y < PAGE_H; y += 44) c.fillRect(0, Math.round(y * r), W, lw);
-    c.fillStyle = MARGIN_C; c.fillRect(Math.round(95 * r), 0, Math.max(1, Math.round(1.5 * r)), H);
+    c.fillStyle = pal.margin; c.fillRect(Math.round(95 * r), 0, Math.max(1, Math.round(1.5 * r)), H);
   } else if (paper === 'grid') {
-    c.fillStyle = GRID_C;
+    c.fillStyle = pal.grid;
     for (let y = 110; y < PAGE_H; y += 22) c.fillRect(0, Math.round(y * r), W, lw);
     for (let x = 22; x < PAGE_W; x += 22) c.fillRect(Math.round(x * r), top, lw, H - top);
   }

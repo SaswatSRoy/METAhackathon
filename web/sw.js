@@ -1,6 +1,6 @@
 // Margin service worker: the app shell opens offline. /api/* always goes to the network.
 // pdf.js (vendor/pdfjs/) is not in the shell: it is cached the first time a PDF is imported.
-const VERSION = 'margin-v8';
+const VERSION = 'margin-v16';
 const SHELL = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'app.js', 'ink.js', 'assistant.js', 'voice.js', 'store.js', 'shelf.js', 'pages.js', 'zoom.js', 'export.js', 'ui.js', 'images.js', 'handwriting.js', 'suggest.js',
@@ -28,17 +28,16 @@ self.addEventListener('fetch', e => {
   const url = new URL(req.url);
   if (url.origin === location.origin && url.pathname.startsWith('/api/')) return;
   if (url.origin !== location.origin && !FONTS.test(req.url)) return;
-  // Stale-while-revalidate: answer from cache at once, refresh it in the background.
+  // Network-first for same-origin app shell (always fresh when online, instant cache fallback offline);
+  // cache-first for external fonts.
   e.respondWith(caches.open(VERSION).then(async cache => {
     const key = req.mode === 'navigate' ? 'index.html' : req;
     const hit = await cache.match(key, { ignoreSearch: req.mode === 'navigate' });
-    // Same-origin refreshes revalidate (a cheap 304 when unchanged) instead of trusting the HTTP cache.
+    if (url.origin !== location.origin && hit) return hit;
     const refresh = url.origin === location.origin ? fetch(req.url, { cache: 'no-cache' }) : fetch(req);
-    const fresh = refresh.then(res => {
+    return refresh.then(res => {
       if (res && (res.ok || res.type === 'opaque')) cache.put(key, res.clone());
       return res;
-    }).catch(() => hit);
-    if (hit) { e.waitUntil(fresh.catch(() => {})); return hit; }
-    return fresh.then(res => res || new Response('Offline', { status: 503 }));
+    }).catch(() => hit || new Response('Offline', { status: 503 }));
   }));
 });

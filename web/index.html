@@ -16,8 +16,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;600&family=Patrick+Hand&family=Inter:wght@400;500;600&family=STIX+Two+Text:ital,wght@0,400;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
-  <script type="module" src="app.js"></script>
+  <link rel="stylesheet" href="styles.css?v=16">
+  <script type="module" src="app.js?v=16"></script>
 </head>
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
@@ -41,15 +41,17 @@
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></symbol>
     <symbol id="i-suggest" viewBox="0 0 24 24"><path d="M12 4a5.5 5.5 0 0 0-3.2 10c.5.4.8 1 .8 1.6V17h4.8v-1.4c0-.6.3-1.2.8-1.6A5.5 5.5 0 0 0 12 4z"/><path d="M9.8 19.8h4.4"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/></symbol>
     <symbol id="i-wake" viewBox="0 0 24 24"><path d="M4.5 10.5v3"/><path d="M8.25 7.5v9"/><path d="M12 4.5v15"/><path d="M15.75 7.5v9"/><path d="M19.5 10.5v3"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5.5"/><path d="M6.5 11L12 5.5l5.5 5.5"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8.5" r="3.5"/><path d="M5.5 19.5c1.6-3.2 4-4.8 6.5-4.8s4.9 1.6 6.5 4.8"/></symbol>
   </svg>
 
   <section id="shelf" class="shelf" hidden>
     <header class="shelf-head">
       <div class="brand big"><span class="mark-logo"></span><b>Margin</b></div>
       <div class="shelf-actions">
-        <button id="account-btn" class="toggle" title="Cloud account &amp; PostgreSQL sync"><i></i><span id="account-label">Sign in</span></button>
+        <button id="account-btn" class="account-pill" title="Cloud account &amp; sync"><span class="acct-avatar" id="account-avatar"><svg><use href="#i-user"/></svg></span><span id="account-label">Sign in</span></button>
         <button id="new-notebook" class="pill-btn" aria-label="New notebook"><svg><use href="#i-plus"/></svg><span>New notebook</span></button>
       </div>
     </header>
@@ -111,8 +113,10 @@
     </div>
 
     <div class="right">
-      <button id="auto" class="toggle" aria-pressed="true" aria-label="Suggestions" title="Suggest what Meta can do when I pause writing"><svg aria-hidden="true"><use href="#i-suggest"/></svg><i></i><span>Suggestions</span></button>
-      <button id="wake" class="toggle" aria-pressed="false" aria-label="Wake word" title="Listen for “Hey Meta”"><svg aria-hidden="true"><use href="#i-wake"/></svg><i></i><span>Wake word</span></button>
+      <button id="auto" class="toggle" aria-pressed="true" aria-label="Suggestions" title="Suggest what Meta can do when I pause writing"><svg aria-hidden="true"><use href="#i-suggest"/></svg><i></i><span>Suggestions</span><b class="short">Suggest</b></button>
+      <button id="meta-eye" class="toggle" aria-pressed="true" aria-label="Meta’s ink: shown" title="Show or hide Meta’s ink"><svg aria-hidden="true"><use href="#i-eye"/></svg><i></i><span>Meta’s ink</span><b class="short">Meta</b></button>
+      <button id="wake" class="toggle" aria-pressed="false" aria-label="Wake word" title="Listen for “Hey Meta”"><svg aria-hidden="true"><use href="#i-wake"/></svg><i></i><span>Wake word</span><b class="short">Wake</b></button>
+      <button id="toolbar-account" class="account-pill compact" title="Cloud account &amp; sync" aria-label="Account"><span class="acct-avatar" id="toolbar-account-avatar"><svg><use href="#i-user"/></svg></span><span id="toolbar-account-label">Sign in</span></button>
       <div class="menu-wrap">
         <button id="more" class="icon" title="More" aria-haspopup="true" aria-expanded="false"><svg><use href="#i-more"/></svg></button>
         <div id="menu" class="menu" hidden>
@@ -126,11 +130,14 @@
           <div class="menu-row"><span>Paper</span><div class="seg mini" id="paper-seg">
             <button data-paper="ruled" aria-pressed="true">Ruled</button><button data-paper="grid" aria-pressed="false">Grid</button><button data-paper="blank" aria-pressed="false">Blank</button>
           </div></div>
+          <div class="menu-row"><span>Theme</span><div class="seg mini" id="theme-seg">
+            <button data-theme="daylight" aria-pressed="true">Daylight</button><button data-theme="sepia" aria-pressed="false">Sepia</button><button data-theme="night" aria-pressed="false">Night</button>
+          </div></div>
           <div class="menu-row"><span>Zoom</span><div class="seg mini">
             <button data-act="zoom-out" title="Zoom out (⌘−)">−</button><button data-act="zoom-reset" id="zoom-label" title="Fit width (⌘0)">100%</button><button data-act="zoom-in" title="Zoom in (⌘+)">+</button>
           </div></div>
           <hr>
-          <button data-act="account"><b>Cloud account &amp; sync</b><small>PostgreSQL backup &amp; sessions</small></button>
+          <button data-act="account"><b id="menu-account-title">Cloud account &amp; sync</b><small id="menu-account-sub">Back up notebooks across devices</small></button>
           <button data-act="export-png">Export page as PNG</button>
           <button data-act="export-pdf">Export notebook as PDF</button>
           <hr>
@@ -150,7 +157,8 @@
       <div id="sheet" class="sheet">
         <div id="page" class="page" data-tool="pen" data-paper="ruled">
           <canvas id="paper"></canvas>
-          <div class="paper-head"><span id="paper-title">Calculus</span><span>Date ____________</span></div>
+          <div class="paper-head"><span id="paper-title">Calculus</span><span id="paper-date" role="button" tabindex="0" title="Click to stamp today’s date">Date ____________</span></div>
+          <div id="scan-band" class="scan-band" hidden></div>
           <canvas id="ink"></canvas>
           <svg id="meta" class="meta-layer"></svg>
           <canvas id="live"></canvas>

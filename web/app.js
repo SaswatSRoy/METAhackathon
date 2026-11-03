@@ -9,7 +9,7 @@ import { Shelf } from './shelf.js';
 import { Sidebar } from './pages.js';
 import { Zoom } from './zoom.js';
 import { exportPNG, exportPDF, paintPaper } from './export.js';
-import { toast, confirmDialog, accountDialog, closePopover } from './ui.js';
+import { toast, confirmDialog, accountDialog, notebookDialog, editReadDialog, userInitials, closePopover } from './ui.js';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -74,6 +74,15 @@ const meta = new MetaInk($('#meta'), nb, {
   inkColor: metaColor,
   onRedo: ask => ask ? callMeta(ask.command, ask.mode, { hintLevel: ask.hint_level }) : callMeta('just give me the answer', 'answer'),
   onCommit: () => scheduleSave(),
+  onEditRead: async (line, ask) => {
+    const fixed = await editReadDialog({ text: line.text });
+    if (!fixed || fixed === line.text) return;
+    const base = lastReadLines.length ? lastReadLines : nb.lines();
+    const overrideLines = base.some(l => l.id === line.id)
+      ? base.map(l => (l.id === line.id ? { ...l, text: fixed } : l))
+      : [...base, { ...line, text: fixed }];
+    callMeta(ask?.command || 'check my work', ask?.mode || 'auto', { hintLevel: ask?.hint_level, overrideLines });
+  },
 });
 nb.ext = { save: () => meta.save(), load: m => meta.load(m) };    // Meta's ink is part of undo/redo
 
@@ -168,6 +177,7 @@ async function showPage(i, { force = false } = {}) {
   hintMemo = null;
   setPaper(p.paper, false);
   syncBg();
+  syncPageDate(p);
   setMetaHidden(false);
   $('#page-num').textContent = `${i + 1} / ${state.pages.length}`;
   $('#prev-page').disabled = i === 0;
@@ -177,6 +187,33 @@ async function showPage(i, { force = false } = {}) {
   history.replaceState(null, '', `#/n/${state.book.id}/${p.id}`);
 }
 
+function syncPageDate(p = current()) {
+  const el = $('#paper-date');
+  if (!el) return;
+  el.textContent = p?.date ? `Date ${p.date}` : 'Date ____________';
+  el.classList.toggle('stamped', !!p?.date);
+}
+$('#paper-date')?.addEventListener('click', () => {
+  const p = current();
+  if (!p) return;
+  const today = new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  p.date = p.date === today ? '' : today;
+  syncPageDate(p);
+  scheduleSave();
+  if (p.date) toast(`Stamped ${p.date} on this page.`);
+});
+$('#paper-date')?.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('#paper-date').click(); } });
+$('#paper-title')?.addEventListener('click', async () => {
+  if (!state.book) return;
+  const v = await notebookDialog({ heading: 'Rename notebook', title: state.book.title, color: state.book.color, submit: 'Save' });
+  if (!v) return;
+  Object.assign(state.book, v);
+  $('#nb-title').textContent = state.book.title;
+  $('#paper-title').textContent = state.book.title;
+  document.title = `${state.book.title} · Margin`;
+  await store.putNotebook(state.book);
+});
+
 function setPaper(paper, save = true) {
   page.dataset.paper = paper;
   nb.setPaper(paper);
@@ -184,6 +221,17 @@ function setPaper(paper, save = true) {
   if (save && current()) { current().paper = paper; saveNow(); }
 }
 $$('#paper-seg [data-paper]').forEach(b => b.onclick = () => setPaper(b.dataset.paper));
+
+const THEMES = new Set(['daylight', 'sepia', 'night']);
+function setTheme(theme, save = true) {
+  if (!THEMES.has(theme)) theme = 'daylight';
+  document.documentElement.dataset.theme = theme;
+  $$('#theme-seg [data-theme]').forEach(b => b.setAttribute('aria-pressed', b.dataset.theme === theme));
+  nb.renderPaper();
+  if (save) { try { localStorage.setItem('margin.theme', theme); } catch { /* private mode */ } }
+}
+try { setTheme(localStorage.getItem('margin.theme') || 'daylight', false); } catch { setTheme('daylight', false); }
+$$('#theme-seg [data-theme]').forEach(b => b.onclick = e => { e.stopPropagation(); setTheme(b.dataset.theme); });
 
 async function persistOrder() {
   state.book.pages = state.pages.map(p => p.id);
@@ -491,7 +539,7 @@ function dismissCoach() { $('#coach').classList.add('gone'); }
 page.addEventListener('pointerdown', dismissCoach, { once: true });
 
 // ---- calling Meta ------------------------------------------------------------------------
-let busy = false, hintMemo = null, noteTipShown = false;
+let busy = false, hintMemo = null, lastReadLines = [];
 const touchOnly = () => matchMedia('(hover: none)').matches;
 
 function nextHintLevel(lines, sig, escalate) {
@@ -501,16 +549,16 @@ function nextHintLevel(lines, sig, escalate) {
 }
 
 let queued = null;
-async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null, spare = false } = {}) {
+async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null, spare = false, overrideLines = null } = {}) {
   if (!current()) return;
   if (busy || meta.writing) {                        // Meta is busy: do it next instead of dropping it
-    queued = [command, mode, { escalate, hintLevel, spare: true }];
+    queued = [command, mode, { escalate, hintLevel, spare: true, overrideLines }];
     toast(`Meta is still writing. It’ll do “${command.length > 40 ? command.slice(0, 39) + '…' : command}” next.`);
     return;
   }
   nb.commitInput();
   dismissCoach();
-  const lines = nb.lines();
+  const lines = overrideLines || nb.lines();
   if (!lines.length && !nb.hasStrokes() && !nb.hasImages()) { toast('Write something on the page first, then ask Meta.'); return; }
   if (/^(more|more help|another hint|next hint|a bit more)\b/i.test(command.trim())) { mode = 'hint'; escalate = true; }
   const sig = nb.signature();
@@ -524,29 +572,26 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
     notebook_id: state.book?.id || null,
     page_id: pageId,
   };
-  if (nb.hasStrokes() || nb.hasImages()) { payload.image = nb.snapshot(); payload.ink_rows = nb.inkRows(); }
+  if (!overrideLines && (nb.hasStrokes() || nb.hasImages())) { payload.image = nb.snapshot(); payload.ink_rows = nb.inkRows(); }
 
   busy = true;
   showReading(true);
   try {
     const resp = await assist(payload);
     if (current()?.id !== pageId) return;           // the student turned the page meanwhile
+    lastReadLines = resp.lines?.length ? resp.lines : lines;
     showReading('writing');
     showTrace(resp.agent_trace);
     const wrong = resp.first_wrong && ((resp.lines || []).find(l => l.id === resp.first_wrong) || lines.find(l => l.id === resp.first_wrong));
     hintMemo = resp.mode === 'hint' && wrong ? { sig, text: wrong.text, level: payload.hint_level } : null;
     nb.checkpoint();                                 // undo removes Meta's new ink
     setMetaHidden(false);
-    await meta.render(resp, lines, { command, mode, hint_level: payload.hint_level }, { spare });
+    await meta.render(resp, overrideLines ? [] : lines, { command, mode, hint_level: payload.hint_level }, { spare });
     if (current()?.id === pageId) {
       saveNow();
       // After a hint: offer "Why?" and the next step right by it.
-      const note = resp.mode === 'hint' && meta.marks.find(m => m.kind === 'note');
-      if (note && suggestOn()) { const b = note.boxes.at(-1); suggest.show(['why', 'next'], { x: b[0] + b[2] - 10, y: b[1] + b[3] + 22 }); }
-      if (hintMemo && !noteTipShown) {               // once per visit: hints get more specific on request
-        noteTipShown = true;
-        toast(touchOnly() ? 'Tap Meta’s note for a more specific hint.' : 'Click Meta’s note for a more specific hint.');
-      }
+      const note = resp.mode === 'hint' && meta.marks.findLast(m => m.kind === 'note');
+      if (note && suggestOn()) { const b = note.box || note.boxes.at(-1); suggest.show(['why', 'more', 'next'], { x: b[0] + b[2] - 10, y: b[1] + b[3] + 22 }); }
     }
   } catch (err) {
     console.warn('[margin] assist failed:', err);
@@ -600,10 +645,20 @@ function showTrace(trace) {
 
 // on: true while Meta reads the page, 'writing' while it writes (tap the page to skip), false when done.
 function showReading(on) {
-  const r = $('#reading');
+  const r = $('#reading'), scan = $('#scan-band');
   ask.classList.toggle('thinking', !!on);
+  page.classList.toggle('is-reading', on === true);
   r.querySelector('span').textContent = on === 'writing' ? 'Meta is writing… tap to skip' : 'Meta is reading your page…';
   askLabel.textContent = on === 'writing' ? 'Meta is writing…' : on ? 'Meta is reading…' : askIdle();
+  if (scan) {
+    if (on === true) {
+      const rows = [...nb.inkRows(), ...nb.lines().map(l => l.bbox)].filter(b => b?.length === 4);
+      const top = rows.length ? Math.max(90, Math.min(...rows.map(b => b[1])) - 18) : 110;
+      const bot = rows.length ? Math.min(PAGE_H - 40, Math.max(...rows.map(b => b[1] + b[3])) + 24) : 360;
+      Object.assign(scan.style, { top: `${top}px`, height: `${Math.max(90, bot - top)}px` });
+      scan.hidden = false;
+    } else scan.hidden = true;
+  }
   if (!on) { r.hidden = true; return; }
   if (on === 'writing') { r.classList.add('writing'); return; }     // stays where it was, by the pen
   r.classList.remove('writing');
@@ -777,27 +832,51 @@ fetch('/api/health').then(r => r.json()).then(h => {
 
 // ---- offline app shell ---------------------------------------------------------------------------
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(err => console.info('[margin] no service worker', err)));
+  addEventListener('load', () => navigator.serviceWorker.register('sw.js').then(r => r.update()).catch(err => console.info('[margin] no service worker', err)));
 }
 
 function updateAccountPill() {
-  const btn = $('#account-btn'), lbl = $('#account-label');
-  if (!btn || !lbl) return;
   const authed = authClient.isAuthenticated();
-  btn.setAttribute('aria-pressed', authed);
-  lbl.textContent = authed ? (authClient.user?.display_name || authClient.user?.email || 'Synced') : 'Sign in';
+  const u = authClient.user;
+  const shortName = authed ? (u?.display_name?.trim()?.split(/\s+/)[0] || u?.email?.split('@')[0] || 'Account') : 'Sign in';
+  const initials = authed ? userInitials(u) : '';
+  for (const [btnId, lblId, avId] of [
+    ['#account-btn', '#account-label', '#account-avatar'],
+    ['#toolbar-account', '#toolbar-account-label', '#toolbar-account-avatar'],
+  ]) {
+    const btn = $(btnId), lbl = $(lblId), av = $(avId);
+    if (!btn || !lbl || !av) continue;
+    btn.classList.toggle('is-authed', authed);
+    btn.setAttribute('aria-pressed', authed);
+    lbl.textContent = shortName;
+    if (authed) av.textContent = initials;
+    else av.innerHTML = '<svg><use href="#i-user"/></svg>';
+  }
+  const mTitle = $('#menu-account-title'), mSub = $('#menu-account-sub');
+  if (mTitle && mSub) {
+    mTitle.textContent = authed ? `Account (${u?.display_name || shortName})` : 'Cloud account & sync';
+    mSub.textContent = authed ? `${u?.email || ''} · Cloud synced` : 'Back up notebooks across devices';
+  }
 }
 async function openAccountModal() {
   const res = await accountDialog(authClient, {
     onSync: async () => {
       const ok = await store.syncWithCloud();
-      if (ok) { toast('Synced notebooks with PostgreSQL.'); shelf.render(); }
+      if (ok) { shelf.render(); }
     },
   });
   updateAccountPill();
-  if (res === 'logout') toast('Signed out of cloud sync.');
+  if (res === 'authenticated') {
+    const u = authClient.user;
+    toast(`Signed in as ${u?.display_name || u?.email || 'your account'}. Notebooks synced.`);
+  } else if (res === 'synced') {
+    toast('Notebooks synced to the cloud.');
+  } else if (res === 'logout') {
+    toast('Signed out of cloud sync.');
+  }
 }
 $('#account-btn')?.addEventListener('click', openAccountModal);
+$('#toolbar-account')?.addEventListener('click', openAccountModal);
 
 // ---- start ------------------------------------------------------------------------------------------
 (async () => {

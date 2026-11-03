@@ -42,7 +42,7 @@ function modal(build) {
     root.hidden = false;
     root.onpointerdown = e => { if (e.target === root) done(null); };
     document.addEventListener('keydown', onKey, true);
-    requestAnimationFrame(() => card.querySelector('input, button.primary')?.focus());
+    requestAnimationFrame(() => [...card.querySelectorAll('input, button.primary')].find(x => !x.closest('[hidden]'))?.focus());
   });
 }
 
@@ -77,79 +77,225 @@ export function confirmDialog({ heading, body, confirm = 'Delete', danger = true
       el('button', { type: 'submit', className: danger ? 'primary danger' : 'primary' }, confirm))));
 }
 
+export const MATH_SYMBOLS = [
+  ['∫ ', '∫', 'Integral'], ['dx', 'dx', 'dx'], ['d/dx ', 'd/dx', 'Derivative'],
+  ['²', 'x²', 'Squared'], ['³', 'x³', 'Cubed'], ['√(', '√', 'Square root'],
+  ['π', 'π', 'Pi'], ['sin(', 'sin', 'Sine'], ['cos(', 'cos', 'Cosine'],
+  ['ln(', 'ln', 'Natural log'], ['e^(', 'eˣ', 'Exponential'], [' + C', '+ C', 'Constant C'],
+];
+
+// Fix a misread handwritten line and re-check with Meta.
+export function editReadDialog({ text = '' }) {
+  return modal(done => {
+    const input = el('input', { type: 'text', value: text, placeholder: 'e.g. ∫ e^x / sin(x) dx', maxLength: 300, autocomplete: 'off', spellcheck: false, 'aria-label': 'What you wrote' });
+    const bar = el('div', { className: 'math-bar dialog-math', role: 'toolbar', 'aria-label': 'Math symbols' },
+      MATH_SYMBOLS.map(([ins, label, title]) => el('button', { type: 'button', title, onclick() {
+        const s = input.selectionStart ?? input.value.length, e = input.selectionEnd ?? s;
+        input.value = input.value.slice(0, s) + ins + input.value.slice(e);
+        input.focus();
+        input.setSelectionRange(s + ins.length, s + ins.length);
+      } }, label)));
+    return el('form', { className: 'dialog small', onsubmit(e) { e.preventDefault(); done(input.value.trim()); } },
+      el('h2', {}, 'Fix what Meta read'),
+      el('p', {}, 'Edit this line so Meta checks the exact expression you meant.'),
+      el('div', { className: 'dialog-fields' }, el('label', {}, 'Expression', input), bar),
+      el('div', { className: 'dialog-actions' },
+        el('button', { type: 'button', className: 'ghost', onclick: () => done(null) }, 'Cancel'),
+        el('button', { type: 'submit', className: 'primary' }, 'Re-check with Meta')));
+  });
+}
+
+export function userInitials(user) {
+  const src = (user?.display_name || user?.email || '').trim();
+  if (!src) return 'M';
+  if (user?.display_name?.trim()) {
+    const parts = user.display_name.trim().split(/\s+/);
+    return (parts[0][0] + (parts[1]?.[0] || '')).toUpperCase();
+  }
+  return src.slice(0, 2).toUpperCase();
+}
+
 // Cloud Account & Session Manager dialog (Sign In / Sign Up / Active Sessions / Quota).
 export function accountDialog(authClient, { onSync } = {}) {
   return modal(done => {
     if (authClient.isAuthenticated()) {
+      const renderQuota = u => {
+        const usedBytes = u?.storage_bytes_used || 0;
+        const quotaBytes = u?.storage_quota_bytes || 52428800;
+        const usedMb = (usedBytes / (1024 * 1024)).toFixed(2);
+        const quotaMb = (quotaBytes / (1024 * 1024)).toFixed(0);
+        const pct = Math.min(100, Math.round((usedBytes / Math.max(1, quotaBytes)) * 100));
+        return { usedMb, quotaMb, pct };
+      };
       const u = authClient.user || {};
-      const usedMb = ((u.storage_bytes_used || 0) / (1024 * 1024)).toFixed(2);
-      const quotaMb = ((u.storage_quota_bytes || 52428800) / (1024 * 1024)).toFixed(0);
-      const sessList = el('div', { className: 'sess-list' }, el('small', {}, 'Loading active sessions…'));
-      authClient.listSessions().then(sessions => {
-        if (!sessions.length) { sessList.replaceChildren(el('small', {}, '1 active session')); return; }
-        sessList.replaceChildren(...sessions.map(s => el('div', { className: 'sess-row' },
-          el('span', {}, `${s.device_name}${s.is_current ? ' (this device)' : ''}`),
-          !s.is_current ? el('button', { type: 'button', className: 'ghost tiny-btn', onclick: async () => {
-            await authClient.revokeSession(s.id);
-            done('revoked');
-          } }, 'Revoke') : el('small', {}, 'Active'))));
+      const q0 = renderQuota(u);
+      const quotaText = el('span', { className: 'storage-nums' }, `${q0.usedMb} / ${q0.quotaMb} MB`);
+      const quotaFill = el('div', { className: 'storage-fill', style: { width: `${Math.max(3, q0.pct)}%` } });
+
+      authClient.fetchMe?.().then(fresh => {
+        if (!fresh) return;
+        const q = renderQuota(fresh);
+        quotaText.textContent = `${q.usedMb} / ${q.quotaMb} MB`;
+        quotaFill.style.width = `${Math.max(3, q.pct)}%`;
       });
-      return el('div', { className: 'dialog small' },
-        el('h2', {}, u.display_name || u.email || 'Cloud Account'),
-        el('p', {}, `${u.email} · ${usedMb} / ${quotaMb} MB used`),
-        el('div', { className: 'field-label' }, 'Active Sessions'),
+
+      const sessList = el('div', { className: 'sess-list' }, el('small', { className: 'sess-empty' }, 'Loading active devices…'));
+      const loadSessions = () => authClient.listSessions().then(sessions => {
+        if (!sessions.length) {
+          sessList.replaceChildren(el('div', { className: 'sess-row' },
+            el('div', { className: 'sess-meta' }, el('b', {}, 'Current Browser'), el('small', {}, 'Active now')),
+            el('span', { className: 'sess-badge current' }, 'This device')));
+          return;
+        }
+        sessList.replaceChildren(...sessions.map(s => el('div', { className: 'sess-row' },
+          el('div', { className: 'sess-meta' },
+            el('b', {}, s.device_name || 'Web Browser'),
+            el('small', {}, `${s.ip_address ? `${s.ip_address} · ` : ''}${s.is_current ? 'Active now' : 'Signed in'}`)),
+          s.is_current
+            ? el('span', { className: 'sess-badge current' }, 'This device')
+            : el('button', { type: 'button', className: 'ghost tiny-btn danger-text', onclick: async e => {
+                e.currentTarget.disabled = true;
+                e.currentTarget.textContent = 'Revoking…';
+                await authClient.revokeSession(s.id);
+                loadSessions();
+              } }, 'Revoke'))));
+      });
+      loadSessions();
+
+      const syncBtn = el('button', { type: 'button', className: 'ghost', onclick: async () => {
+        syncBtn.disabled = true;
+        syncBtn.textContent = 'Syncing…';
+        try { await onSync?.(); done('synced'); }
+        finally { syncBtn.disabled = false; syncBtn.textContent = 'Sync now'; }
+      } }, 'Sync now');
+
+      const displayName = u.display_name || (u.email ? u.email.split('@')[0] : 'Margin Account');
+      return el('div', { className: 'dialog auth-dialog' },
+        el('div', { className: 'auth-top' },
+          el('div', { className: 'acct-profile' },
+            el('div', { className: 'acct-badge' }, userInitials(u)),
+            el('div', { className: 'acct-info' },
+              el('div', { className: 'acct-name-row' },
+                el('h2', {}, displayName),
+                el('span', { className: 'sync-pill' }, 'Synced')),
+              el('span', { className: 'acct-email' }, u.email || ''))),
+          el('button', { type: 'button', className: 'dialog-close', 'aria-label': 'Close', onclick: () => done(null) }, '×')),
+        el('div', { className: 'storage-card' },
+          el('div', { className: 'storage-head' }, el('span', {}, 'Cloud Notebook Backup'), quotaText),
+          el('div', { className: 'storage-bar' }, quotaFill)),
+        el('div', { className: 'field-label' }, 'Active Devices & Sessions'),
         sessList,
-        el('div', { className: 'dialog-actions' },
-          el('button', { type: 'button', className: 'ghost', onclick: () => done(null) }, 'Close'),
-          el('button', { type: 'button', className: 'ghost', onclick: async () => { await onSync?.(); done('synced'); } }, 'Sync now'),
+        el('div', { className: 'dialog-actions auth-acct-actions' },
+          syncBtn,
           el('button', { type: 'button', className: 'primary danger', onclick: async () => { await authClient.logout(); done('logout'); } }, 'Sign Out')));
     }
 
     let isRegister = false;
-    const errBox = el('div', { className: 'auth-error', hidden: true });
-    const nameInput = el('input', { type: 'text', id: 'auth-name', name: 'name', autocomplete: 'name', placeholder: 'Ada Lovelace', maxLength: 80 });
-    const nameWrap = el('label', { for: 'auth-name', hidden: true }, 'Name', nameInput);
+    const errBox = el('div', { className: 'auth-error', role: 'alert', hidden: true });
+    const nameInput = el('input', { type: 'text', id: 'auth-name', name: 'name', autocomplete: 'name', placeholder: 'e.g. Ada Lovelace', maxLength: 80 });
+    const nameWrap = el('label', { for: 'auth-name', className: 'auth-field', hidden: true },
+      el('span', { className: 'auth-label-row' }, 'Full name', el('small', {}, 'Optional')),
+      nameInput);
     const emailInput = el('input', { type: 'email', id: 'auth-email', name: 'email', autocomplete: 'username', inputMode: 'email', placeholder: 'you@example.com', required: true });
-    const passInput = el('input', { type: 'password', id: 'auth-password', name: 'password', autocomplete: 'current-password', placeholder: 'At least 8 chars (letter + number)', minLength: 8, maxLength: 128, required: true });
-    const submitBtn = el('button', { type: 'submit', className: 'primary' }, 'Sign In');
-    const heading = el('h2', {}, 'Sign in to Margin Cloud');
-    const switchBtn = el('button', { type: 'button', className: 'ghost', onclick() {
-      isRegister = !isRegister;
-      heading.textContent = isRegister ? 'Create your Margin account' : 'Sign in to Margin Cloud';
-      nameWrap.hidden = !isRegister;
-      passInput.autocomplete = isRegister ? 'new-password' : 'current-password';
-      submitBtn.textContent = isRegister ? 'Create Account' : 'Sign In';
-      switchBtn.textContent = isRegister ? 'Have an account? Sign In' : 'New here? Create account';
-      errBox.hidden = true;
-    } }, 'New here? Create account');
+    const passInput = el('input', { type: 'password', id: 'auth-password', name: 'password', autocomplete: 'current-password', placeholder: 'Enter your password', minLength: 8, maxLength: 128, required: true });
 
-    return el('form', { className: 'dialog small', async onsubmit(e) {
+    const pwToggle = el('button', { type: 'button', className: 'pw-toggle', 'aria-label': 'Show password', onclick() {
+      const show = passInput.type === 'password';
+      passInput.type = show ? 'text' : 'password';
+      pwToggle.textContent = show ? 'Hide' : 'Show';
+      pwToggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+      passInput.focus();
+    } }, 'Show');
+
+    const reqLen = el('span', { className: 'pw-chip' }, '8+ chars');
+    const reqLet = el('span', { className: 'pw-chip' }, '1+ letter');
+    const reqNum = el('span', { className: 'pw-chip' }, '1+ number/symbol');
+    const pwHints = el('div', { className: 'pw-hints', hidden: true }, reqLen, reqLet, reqNum);
+
+    passInput.addEventListener('input', () => {
+      const v = passInput.value;
+      reqLen.classList.toggle('met', v.length >= 8);
+      reqLet.classList.toggle('met', /[a-zA-Z]/.test(v));
+      reqNum.classList.toggle('met', /[^a-zA-Z\s]/.test(v));
+    });
+
+    const heading = el('h2', {}, 'Welcome back');
+    const sub = el('p', {}, 'Sign in to sync your notebooks, handwriting, and Meta’s hints across devices.');
+    const submitBtn = el('button', { type: 'submit', className: 'primary auth-submit' }, 'Sign In');
+    const tabSignIn = el('button', { type: 'button', role: 'tab', 'aria-selected': 'true', onclick: () => setMode(false) }, 'Sign In');
+    const tabRegister = el('button', { type: 'button', role: 'tab', 'aria-selected': 'false', onclick: () => setMode(true) }, 'Create Account');
+    const footPrompt = el('span', {}, 'New to Margin?');
+    const footLink = el('button', { type: 'button', className: 'auth-link', onclick: () => setMode(!isRegister) }, 'Create an account');
+
+    function setMode(registerMode) {
+      isRegister = registerMode;
+      tabSignIn.setAttribute('aria-selected', String(!isRegister));
+      tabRegister.setAttribute('aria-selected', String(isRegister));
+      heading.textContent = isRegister ? 'Create your account' : 'Welcome back';
+      sub.textContent = isRegister
+        ? 'Back up your notebooks, ink, and Meta’s margin notes in the cloud.'
+        : 'Sign in to sync your notebooks, handwriting, and Meta’s hints across devices.';
+      nameWrap.hidden = !isRegister;
+      pwHints.hidden = !isRegister;
+      passInput.autocomplete = isRegister ? 'new-password' : 'current-password';
+      passInput.placeholder = isRegister ? 'Create a password (8+ chars)' : 'Enter your password';
+      submitBtn.textContent = isRegister ? 'Create Account' : 'Sign In';
+      footPrompt.textContent = isRegister ? 'Already have an account?' : 'New to Margin?';
+      footLink.textContent = isRegister ? 'Sign in' : 'Create an account';
+      errBox.hidden = true;
+      (isRegister ? nameInput : emailInput).focus();
+    }
+
+    return el('form', { className: 'dialog auth-dialog', novalidate: true, async onsubmit(e) {
       e.preventDefault();
       errBox.hidden = true;
+      const email = emailInput.value.trim();
+      const pass = passInput.value;
+      if (!email) {
+        errBox.textContent = 'Please enter your email address.';
+        errBox.hidden = false;
+        emailInput.focus();
+        return;
+      }
+      if (!pass || (isRegister && pass.length < 8)) {
+        errBox.textContent = isRegister ? 'Password must be at least 8 characters with a letter and number.' : 'Please enter your password.';
+        errBox.hidden = false;
+        passInput.focus();
+        return;
+      }
       submitBtn.disabled = true;
+      submitBtn.textContent = isRegister ? 'Creating account…' : 'Signing in…';
       try {
-        if (isRegister) await authClient.register(emailInput.value, passInput.value, nameInput.value);
-        else await authClient.login(emailInput.value, passInput.value);
+        if (isRegister) await authClient.register(email, pass, nameInput.value);
+        else await authClient.login(email, pass);
         await onSync?.();
         done('authenticated');
       } catch (err) {
-        errBox.textContent = err.message || 'Authentication failed';
+        errBox.textContent = err.message || 'Authentication failed. Please check your details.';
         errBox.hidden = false;
       } finally {
         submitBtn.disabled = false;
+        submitBtn.textContent = isRegister ? 'Create Account' : 'Sign In';
       }
     } },
-      heading,
-      el('p', {}, 'Sync your notebooks, ink and Meta’s hints to PostgreSQL.'),
+      el('div', { className: 'auth-top' },
+        el('div', { className: 'auth-brand' },
+          el('span', { className: 'mark-logo auth-logo' }),
+          el('div', {}, heading, sub)),
+        el('button', { type: 'button', className: 'dialog-close', 'aria-label': 'Close', onclick: () => done(null) }, '×')),
+      el('div', { className: 'auth-tabs', role: 'tablist' }, tabSignIn, tabRegister),
       errBox,
-      el('div', { className: 'dialog-fields' },
+      el('div', { className: 'dialog-fields auth-fields' },
         nameWrap,
-        el('label', { for: 'auth-email' }, 'Email', emailInput),
-        el('label', { for: 'auth-password' }, 'Password', passInput)),
-      el('div', { className: 'dialog-actions' },
-        switchBtn,
-        el('button', { type: 'button', className: 'ghost', onclick: () => done(null) }, 'Cancel'),
-        submitBtn));
+        el('label', { for: 'auth-email', className: 'auth-field' },
+          el('span', { className: 'auth-label-row' }, 'Email address'),
+          emailInput),
+        el('label', { for: 'auth-password', className: 'auth-field' },
+          el('span', { className: 'auth-label-row' }, 'Password'),
+          el('div', { className: 'pw-wrap' }, passInput, pwToggle)),
+        pwHints),
+      submitBtn,
+      el('div', { className: 'auth-foot' }, footPrompt, footLink));
   });
 }
 

@@ -743,7 +743,29 @@ export class Notebook {
     el.style.color = orig?.color ?? this.color;
     const grip = document.createElement('span'); grip.className = 'tbox-grip'; grip.title = 'Drag to move';
     const size = document.createElement('span'); size.className = 'tbox-size'; size.title = 'Drag to resize';
-    ui.append(el, grip, size);
+    const mathBar = document.createElement('div');
+    mathBar.className = 'tbox-math';
+    mathBar.setAttribute('role', 'toolbar');
+    mathBar.setAttribute('aria-label', 'Quick math symbols');
+    for (const [ins, lbl, tip] of [
+      ['∫ ', '∫', 'Integral (int)'], ['dx', 'dx', 'dx'], ['d/dx ', 'd/dx', 'Derivative'],
+      ['²', 'x²', 'Squared (^2)'], ['³', 'x³', 'Cubed (^3)'], ['√(', '√', 'Square root'],
+      ['π', 'π', 'Pi'], ['sin(', 'sin', 'Sine'], ['cos(', 'cos', 'Cosine'],
+      ['ln(', 'ln', 'Natural log'], ['e^(', 'eˣ', 'Exponential'], ['= ', '=', 'Equals'], [' + C', '+ C', 'Constant C'],
+    ]) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.textContent = lbl; b.title = tip;
+      b.addEventListener('pointerdown', e => {
+        e.preventDefault(); e.stopPropagation();
+        const st = el.selectionStart ?? el.value.length, en = el.selectionEnd ?? st;
+        el.value = el.value.slice(0, st) + ins + el.value.slice(en);
+        el.focus();
+        el.setSelectionRange(st + ins.length, st + ins.length);
+        place();
+      });
+      mathBar.append(b);
+    }
+    ui.append(mathBar, el, grip, size);
     if (orig) { orig.editing = true; this.redraw(); }
     const s = this.input = { ui, el, orig, x, y, w };
     const off = 36 - editorBaseline(RULE);
@@ -753,7 +775,12 @@ export class Notebook {
       el.style.height = Math.max(RULE, Math.ceil(el.scrollHeight / RULE) * RULE) + 'px';
     };
     el.addEventListener('input', () => {
-      const v = el.value.replace(/\\int/g, '∫').replace(/(^|[\s=+\-−(])int\s/g, '$1∫ ').replace(/->/g, '→');
+      const v = el.value
+        .replace(/\\int/g, '∫')
+        .replace(/(^|[\s=+\-−(])int\s/g, '$1∫ ')
+        .replace(/\\pi\b/g, 'π')
+        .replace(/\\sqrt\b/g, '√')
+        .replace(/->/g, '→');
       if (v !== el.value) { const c = el.selectionStart + v.length - el.value.length; el.value = v; el.setSelectionRange(c, c); }
       place();
     });
