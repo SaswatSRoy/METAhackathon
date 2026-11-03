@@ -1,7 +1,7 @@
 // Meta's ink: renders /api/assist annotations as handwriting on their own SVG layer.
 // Words and maths are real pen strokes from Writey's handwriting engine (./handwriting.js),
 // animated stroke by stroke; the Caveat font is only a fallback if the engine throws.
-import { PAGE_W, PAGE_H, RULE, MARGIN_X, rowY, rowAt, baselineOf, overlap, inBox } from './ink.js';
+import { PAGE_W, PAGE_H, RULE, MARGIN_X, rowY, rowAt, baselineOf, overlap, inBox, isMeta, setMarkPainter, prepareItem } from './ink.js';
 import { authClient } from './store.js';
 import { mathBox, textBox, lineBox, paragraph, toLatex, isMath, pathD, penTimes, penWidth, emFor, newSeed } from './handwriting.js';
 import { splitRows } from './vendor/writey/latex.js';
@@ -75,50 +75,84 @@ export function mathRuns(text) {
 const mathFont = (px, it) => `${it ? 'italic ' : ''}400 ${px}px ${MATH_FONT}`;
 const measureMath = (text, px) => mathRuns(text).reduce((w, r) => { mctx.font = mathFont(px, r.it); return w + mctx.measureText(r.t).width; }, 0);
 
-// Paints Meta's ink onto a 2D canvas (PNG/PDF export, thumbnails). `marks` is serialized data.
-// Handwriting is stored as the same stroke paths the page shows, so exports match the screen.
+// Paints Meta's ink onto a 2D canvas (PNG/PDF export, thumbnails). `marks` is serialized data:
+// only previews and "I read" labels stay in page.meta now (finished ink is in page.items), but
+// older pages keep every mark here, so this still draws them all.
 export const META_COLOR = '#d0452b';
 const READ_COLOR = '#9aa3ad';
 export function paintMeta(ctx, marks = []) {
-  const root = document.createElementNS(NS, 'svg');
-  for (const d of marks) {
-    const g = svgEl('g', {}, root);
-    g.innerHTML = d.html;
-    const ghost = d.kind === 'ghost' && !g.querySelector('path.ink-stroke');       // older pages: ghost text
-    const faint = d.pending ? 0.34 : 1;
-    const color = d.kind === 'read' ? READ_COLOR : META_COLOR;
-    for (const p of g.querySelectorAll('path.shade')) {
-      ctx.save(); ctx.fillStyle = META_COLOR; ctx.globalAlpha = (+p.getAttribute('fill-opacity') || 0.14) * faint;
-      ctx.fill(new Path2D(p.getAttribute('d'))); ctx.restore();
+  for (const d of marks) paintMarkHtml(ctx, d.html, { kind: d.kind, faint: d.pending ? 0.34 : 1, color: d.color || META_COLOR });
+}
+const parsed = new Map();                          // html -> parsed <g>, so canvas repaints don't reparse
+function parseMark(html) {
+  let g = parsed.get(html);
+  if (!g) {
+    g = svgEl('g', {}, document.createElementNS(NS, 'svg'));
+    g.innerHTML = html;
+    if (parsed.size > 300) parsed.clear();
+    parsed.set(html, g);
+  }
+  return g;
+}
+export function paintMarkHtml(ctx, html, { kind = '', faint = 1, color = META_COLOR } = {}) {
+  const g = parseMark(html);
+  const ghost = kind === 'ghost' && !g.querySelector('path.ink-stroke');       // older pages: ghost text
+  if (kind === 'read') color = READ_COLOR;
+  for (const p of g.querySelectorAll('path.shade')) {
+    ctx.save(); ctx.fillStyle = color; ctx.globalAlpha = (+p.getAttribute('fill-opacity') || 0.14) * faint;
+    ctx.fill(new Path2D(p.getAttribute('d'))); ctx.restore();
+  }
+  for (const p of g.querySelectorAll('path.ink-stroke')) {
+    ctx.save();
+    ctx.globalAlpha = (+(p.getAttribute('opacity') ?? 0.92) || 0.92) * faint; ctx.strokeStyle = color; ctx.lineCap = ctx.lineJoin = 'round';
+    ctx.lineWidth = +p.getAttribute('stroke-width') || 2.4;
+    const dash = p.getAttribute('stroke-dasharray');
+    if (dash) ctx.setLineDash(dash.split(/[\s,]+/).map(Number));
+    ctx.stroke(new Path2D(p.getAttribute('d')));
+    ctx.restore();
+  }
+  for (const t of g.querySelectorAll('text')) {                 // Caveat fallback and older pages
+    ctx.save();
+    const x = +t.getAttribute('x'), y = +t.getAttribute('y');
+    const rot = /rotate\(([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\)/.exec(t.parentNode.getAttribute?.('transform') || '');
+    if (rot) { ctx.translate(+rot[2], +rot[3]); ctx.rotate(+rot[1] * Math.PI / 180); ctx.translate(-rot[2], -rot[3]); }
+    if (t.classList.contains('read-label')) { ctx.font = '500 10.5px Inter, sans-serif'; ctx.fillStyle = READ_COLOR; ctx.fillText(t.textContent, x, y); }
+    else if (t.classList.contains('typeset')) {
+      const px = +t.getAttribute('font-size') || 24;
+      ctx.fillStyle = color;
+      let cx = x;
+      for (const r of mathRuns(t.textContent)) { ctx.font = mathFont(px, r.it); ctx.fillText(r.t, cx, y); cx += ctx.measureText(r.t).width; }
+    } else {
+      ctx.font = `600 ${t.getAttribute('font-size') || 30}px ${FONT}, cursive`; ctx.fillStyle = color; ctx.globalAlpha = (ghost ? 0.32 : +(t.getAttribute('opacity') ?? 1)) * faint;
+      ctx.fillText(t.textContent, x, y);
     }
-    for (const p of g.querySelectorAll('path.ink-stroke')) {
-      ctx.save();
-      ctx.globalAlpha = (+(p.getAttribute('opacity') ?? 0.92) || 0.92) * faint; ctx.strokeStyle = color; ctx.lineCap = ctx.lineJoin = 'round';
-      ctx.lineWidth = +p.getAttribute('stroke-width') || 2.4;
-      const dash = p.getAttribute('stroke-dasharray');
-      if (dash) ctx.setLineDash(dash.split(/[\s,]+/).map(Number));
-      ctx.stroke(new Path2D(p.getAttribute('d')));
-      ctx.restore();
-    }
-    for (const t of g.querySelectorAll('text')) {                 // Caveat fallback and older pages
-      ctx.save();
-      const x = +t.getAttribute('x'), y = +t.getAttribute('y');
-      const rot = /rotate\(([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\)/.exec(t.parentNode.getAttribute?.('transform') || '');
-      if (rot) { ctx.translate(+rot[2], +rot[3]); ctx.rotate(+rot[1] * Math.PI / 180); ctx.translate(-rot[2], -rot[3]); }
-      if (t.classList.contains('read-label')) { ctx.font = '500 10.5px Inter, sans-serif'; ctx.fillStyle = READ_COLOR; ctx.fillText(t.textContent, x, y); }
-      else if (t.classList.contains('typeset')) {
-        const px = +t.getAttribute('font-size') || 24;
-        ctx.fillStyle = META_COLOR;
-        let cx = x;
-        for (const r of mathRuns(t.textContent)) { ctx.font = mathFont(px, r.it); ctx.fillText(r.t, cx, y); cx += ctx.measureText(r.t).width; }
-      } else {
-        ctx.font = `600 ${t.getAttribute('font-size') || 30}px ${FONT}, cursive`; ctx.fillStyle = META_COLOR; ctx.globalAlpha = (ghost ? 0.32 : +(t.getAttribute('opacity') ?? 1)) * faint;
-        ctx.fillText(t.textContent, x, y);
-      }
-      ctx.restore();
-    }
+    ctx.restore();
   }
 }
+// Meta's graphs (and font-fallback marks) live in the notebook as type 'mark' items.
+setMarkPainter((ctx, it) => {
+  ctx.save(); ctx.translate(it.x || 0, it.y || 0);
+  paintMarkHtml(ctx, it.html, { kind: it.mk, color: it.color || META_COLOR });
+  ctx.restore();
+});
+
+// Polylines of a stored mark's paths (for hit-testing older marks that kept no point lists).
+function polysFromHtml(html) {
+  const out = [];
+  for (const p of parseMark(html).querySelectorAll('path.ink-stroke')) {
+    for (const sub of (p.getAttribute('d') || '').split(/(?=M)/)) {
+      const n = (sub.match(/-?[\d.]+/g) || []).map(Number), pts = [];
+      for (let i = 0; i + 1 < n.length; i += 2) pts.push([Math.round(n[i] * 10) / 10, Math.round(n[i + 1] * 10) / 10]);
+      if (pts.length) out.push(pts);
+    }
+  }
+  return out;
+}
+const unionBox = bs => {
+  const x0 = Math.min(...bs.map(b => b[0])), y0 = Math.min(...bs.map(b => b[1]));
+  return [x0, y0, Math.max(...bs.map(b => b[0] + b[2])) - x0, Math.max(...bs.map(b => b[1] + b[3])) - y0];
+};
+const r1 = v => Math.round(v * 10) / 10;
 
 export async function assist(payload, timeoutMs = 45000) {
   const ctl = new AbortController();
@@ -130,99 +164,191 @@ export async function assist(payload, timeoutMs = 45000) {
   } finally { clearTimeout(timer); }
 }
 
+// Meta writes on its SVG layer (the animated "pen writing" moment). As soon as a mark is finished it is
+// baked into the notebook as ordinary items tagged by: 'meta' (see the ownership rule in ink.js), so the
+// eraser, lasso, undo, save and export treat it like the student's ink. Only previews (answers / ghost
+// steps waiting for Accept) and the grey "I read" labels stay on the SVG layer, in `this.live`.
 export class MetaInk {
-  constructor(svg, nb, { onReveal, onNoteTap, onRedo, onCommit } = {}) {
-    Object.assign(this, { svg, nb, onReveal, onNoteTap, onRedo, onCommit });
-    this.marks = []; this.run = 0; this.n = 0; this.byId = new Map();
+  constructor(svg, nb, { onReveal, onRedo, onCommit, inkColor } = {}) {
+    Object.assign(this, { svg, nb, onReveal, onRedo, onCommit, inkColor });
+    this.live = []; this.run = 0; this.n = 0; this.byId = new Map();
     svg.setAttribute('viewBox', `0 0 ${PAGE_W} ${PAGE_H}`);
     this.defs = svgEl('defs', {}, svg);
     // Accept / Redo / Discard pills for ink shown as a preview; HTML so they are real buttons.
     this.ui = Object.assign(document.createElement('div'), { className: 'meta-ui' });
     svg.after(this.ui);
   }
+  // The colour Meta writes in now (the "Meta's ink" setting; "My pen" = the student's pen colour).
+  color() { return this.inkColor?.() || META_COLOR; }
+  syncColor() { this.svg.style.setProperty('--meta', this.color()); }
+
+  // Everything Meta has on the page: baked marks grouped from the notebook's items, then live SVG marks.
+  get marks() { return [...this.groups(), ...this.live]; }             // oldest first: baked, then in flight
+  groups() {
+    const by = new Map();
+    for (const it of this.nb.items) if (isMeta(it)) { const k = it.grp || it; if (!by.has(k)) by.set(k, []); by.get(k).push(it); }
+    return [...by.values()].map(items => ({
+      kind: items[0].mk || 'note', rid: items[0].rid || null, items, baked: true, pts: [],
+      strokes: items.reduce((n, it) => n + (it.segs?.length ?? (it.type === 'stroke' ? 1 : 0)), 0),
+      boxes: items.map(it => it.bbox), box: unionBox(items.map(it => it.bbox)),
+      note: items.find(it => it.note)?.note || null, text: items.find(it => it.say)?.say || '', kept: items.some(it => it.kept),
+    }));
+  }
 
   // ---- layer management ------------------------------------------------------
   mark(kind) {
     const g = svgEl('g', { class: `mark ${kind}` }, this.svg);
-    const m = { g, kind, pts: [], boxes: [] };
-    this.marks.push(m);
+    const m = { g, kind, pts: [], boxes: [], rid: this.pid };      // rid: which reply wrote it
+    this.live.push(m);
     return m;
   }
-  // record: take an undo snapshot first (the student cleared Meta's ink on purpose).
+  fadeOut(ms) { for (const m of ms) { m.g.classList.add('fade'); m.t = setTimeout(() => m.g.remove(), 380); } }
+  // All of Meta's ink: previews, labels and every by:'meta' item. record: one undo step first.
   clear(record = false) {
-    if (record && this.marks.length) this.nb.checkpoint();
+    const n = this.live.length + this.nb.metaItems().length;
+    if (!n) return 0;
+    if (record) this.nb.checkpoint();
     this.run++;
-    const gone = this.marks;
-    this.marks = [];
-    for (const m of gone) { m.g.classList.add('fade'); m.t = setTimeout(() => m.g.remove(), 380); }
+    this.fadeOut(this.live);
+    this.live = [];
+    this.nb.removeMeta();
     this.syncPills();
-    return gone.length;
+    return n;
   }
-  // Fade out only the marks of the given kinds, so tidy-ups and graphs survive a new hint.
-  clearKinds(kinds) {
+  // Only the marks of the given kinds, so tidy-ups, graphs and accepted answers survive a new hint.
+  // spare: a reply id whose marks stay (a queued command must not wipe the answer just before it).
+  clearKinds(kinds, spare = null) {
     this.run++;
-    const gone = this.marks.filter(m => kinds.has(m.kind));
-    this.marks = this.marks.filter(m => !kinds.has(m.kind));
-    for (const m of gone) { m.g.classList.add('fade'); m.t = setTimeout(() => m.g.remove(), 380); }
+    const go = m => kinds.has(m.kind) && !(spare && m.rid === spare);
+    this.fadeOut(this.live.filter(go));
+    this.live = this.live.filter(m => !go(m));
+    this.nb.removeMeta(it => kinds.has(it.mk) && !it.kept && !(spare && it.rid === spare));
     this.syncPills();
   }
+  // The eraser on live marks (previews, read labels): stroke by stroke, like ink.
   erase({ x, y }, R) {
-    const hit = this.marks.filter(m => m.boxes.some(b => inBox(b, x, y, R / 2)) || m.pts.some(([px, py]) => Math.hypot(px - x, py - y) < R + 3));
-    for (const m of hit) { m.g.remove(); this.marks.splice(this.marks.indexOf(m), 1); }
-    if (hit.length) this.syncPills();
-    return hit.length > 0;
+    let any = false;
+    for (const m of [...this.live]) {
+      for (const p of m.g.querySelectorAll('path.ink-stroke')) {
+        if (!p._polys?.some(poly => poly.some(([px, py]) => Math.hypot(px - x, py - y) < R + 3))) continue;
+        p.remove(); any = true;
+      }
+      const empty = !m.g.querySelector('path.ink-stroke, text');
+      const textHit = m.g.querySelector('text') && m.boxes.some(b => inBox(b, x, y, R / 2));
+      if (empty || textHit) { m.g.remove(); this.live.splice(this.live.indexOf(m), 1); any = true; }
+    }
+    if (any) this.syncPills();
+    return any;
   }
 
-  // ---- undo snapshots (see Notebook.ext): the marks, and which were still previews ----------
-  save() { return this.marks.map(m => ({ m, pending: !!m.pending })); }
+  // ---- undo snapshots (see Notebook.ext): the live marks, and which were still previews ----------
+  // Path elements the eraser took out of a preview are restored too.
+  save() { return this.live.map(m => ({ m, pending: !!m.pending, kids: [...m.g.childNodes] })); }
   load(list = []) {
     this.run++;
     const ms = list.map(e => e.m || e);
-    for (const m of this.marks) if (!ms.includes(m)) m.g.remove();
+    for (const m of this.live) if (!ms.includes(m)) m.g.remove();
     for (const e of list) {
       const m = e.m || e;
       if (e.m) this.setPending(m, e.pending);
+      if (e.kids) m.g.replaceChildren(...e.kids);
       clearTimeout(m.t); m.g.classList.remove('fade'); this.svg.append(m.g);
     }
-    this.marks = [...ms];
+    this.live = [...ms];
     this.syncPills();
   }
 
-  // ---- persistence: marks as plain JSON (finished SVG markup + hit boxes) ----------
+  // ---- persistence: live marks as plain JSON (finished SVG markup, point lists, hit boxes) ----------
   serialize() {
-    return this.marks.map(m => ({
+    return this.live.map(m => ({
       kind: m.kind, html: cleanMarkup(m.g), boxes: m.boxes, pts: m.pts.map(([x, y]) => [Math.round(x), Math.round(y)]), note: m.note || null,
+      polys: [...m.g.querySelectorAll('path.ink-stroke')].map(p => (p._polys || []).map(poly => poly.map(([x, y]) => [r1(x), r1(y)]))),
+      color: this.color(),
       ...(m.pending ? { pending: true, pid: m.pid, ask: m.ask || null } : {}),
     }));
   }
-  // Replace the layer with stored marks (switching pages, reload). Drops everything in flight.
+  // Stored page.meta -> what stays live (previews, read labels) and items for finished marks. Older
+  // pages kept every mark as SVG markup: those become one by:'meta' 'mark' item each (erasable,
+  // movable), so old notebooks behave like new ones.
+  split(data = []) {
+    const live = [], items = [];
+    (data || []).forEach((d, i) => {
+      if (d.pending || d.kind === 'read') { live.push(d); return; }
+      if (!d.html) return;
+      const bs = [...(d.boxes || []), ...(d.pts?.length > 1 ? [ptsBox(d.pts)] : [])];
+      if (!bs.length) return;
+      const it = { type: 'mark', by: 'meta', mk: d.kind, grp: `old${Date.now().toString(36)}${i}`, html: d.html, box0: unionBox(bs), x: 0, y: 0, color: d.color || META_COLOR, polys: polysFromHtml(d.html) };
+      const g = parseMark(d.html), say = markText(g);
+      if (say) it.say = say;
+      if (d.note) it.note = d.note;
+      items.push(it);
+    });
+    return { live, items };
+  }
+  // Replace the layer with stored live marks (switching pages, reload). Drops everything in flight.
   restore(data = []) {
     this.run++;
-    for (const m of this.marks) { clearTimeout(m.t); m.g.remove(); }
+    for (const m of this.live) { clearTimeout(m.t); m.g.remove(); }
     this.svg.querySelectorAll('g.mark').forEach(g => g.remove());
     this.defs.replaceChildren();
-    this.marks = [];
+    this.live = [];
+    this.syncColor();
     for (const d of data || []) {
       const m = this.mark(d.kind);
       m.g.innerHTML = d.html;
       m.boxes = d.boxes || []; m.pts = d.pts || []; m.note = d.note || null;
+      const paths = m.g.querySelectorAll('path.ink-stroke');
+      paths.forEach((p, i) => { p._polys = d.polys?.[i] || polysFromHtml(`<path class="ink-stroke" d="${p.getAttribute('d')}"/>`); });
       if (d.pending) { m.pid = d.pid; m.ask = d.ask; this.setPending(m, true); }
-      if (m.note) this.makeTappable(m);
     }
     this.syncPills();
   }
-  makeTappable(m) {
-    if (!this.onNoteTap || m.g.classList.contains('tap-target')) return;
-    m.g.classList.add('tap-target');
-    m.g.setAttribute('role', 'button');
-    if (!m.g.querySelector('rect.hit') && m.boxes.length) {
-      const pad = 6, xs = m.boxes.map(q => q[0]), ys = m.boxes.map(q => q[1]);
-      svgEl('rect', { class: 'hit', x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, width: Math.max(...m.boxes.map(q => q[0] + q[2])) - Math.min(...xs) + 2 * pad, height: Math.max(...m.boxes.map(q => q[1] + q[3])) - Math.min(...ys) + 2 * pad, rx: 8 }, m.g);
+
+  // ---- baking: a finished mark becomes notebook items -------------------------------------
+  // A mark of plain pen strokes (words, maths, ticks, circles, arrows, plain graphs) becomes ONE 'ink'
+  // item holding every pen stroke as a seg, from the engine's point lists (the eraser still takes them
+  // one by one). Anything else (shaded or dashed graphs, the font fallback) becomes one 'mark' item
+  // holding its markup. Not undoable by itself: callers checkpoint.
+  bake(m, extra = {}) {
+    const color = this.color(), grp = `g${Date.now().toString(36)}${++this.n}`;
+    const paths = [...m.g.querySelectorAll('path.ink-stroke')];
+    const plain = paths.length && !m.g.querySelector('text, path.shade, [stroke-dasharray]') && paths.every(p => p._polys?.length);
+    const base = { by: 'meta', mk: m.kind, grp, ...(m.rid ? { rid: m.rid } : {}), ...extra };
+    let items;
+    if (plain) {
+      const segs = paths.flatMap(p => {
+        const op = p.getAttribute('opacity'), w = +p.getAttribute('stroke-width') || 2.4;
+        return p._polys.filter(poly => poly.length).map(poly => ({ p: poly.map(([x, y]) => [x, y]), w, ...(op != null ? { o: +op } : {}) }));
+      });
+      items = segs.length ? [{ type: 'ink', ...base, color, segs }] : [];
+    } else {
+      const html = cleanMarkup(m.g);
+      const bs = [...m.boxes, ...(m.pts.length > 1 ? [ptsBox(m.pts)] : [])];
+      if (!bs.length) { m.g.remove(); this.live = this.live.filter(x => x !== m); return []; }
+      const polys = paths.flatMap(p => p._polys || []).map(poly => poly.map(([x, y]) => [r1(x), r1(y)]));
+      items = [{ type: 'mark', ...base, html, box0: unionBox(bs), x: 0, y: 0, color, polys: polys.length ? polys : polysFromHtml(html) }];
     }
-    m.g.addEventListener('click', () => this.onNoteTap(m.note));
+    if (!items.length) { m.g.remove(); this.live = this.live.filter(x => x !== m); return []; }
+    const say = markText(m.g);
+    if (say) items[0].say = say;
+    if (m.note) items[0].note = m.note;
+    this.nb.items.push(...items.map(prepareItem));
+    this.live = this.live.filter(x => x !== m);
+    clearTimeout(m.t); m.g.remove();
+    this.nb.redraw();
+    return items;
   }
-  // Everything Meta has drawn: text boxes plus the extent of its strokes (circles, ticks, arrows).
-  metaBoxes() { return this.marks.flatMap(m => m.pts.length > 1 ? [...m.boxes, ptsBox(m.pts)] : m.boxes); }
+  // Recolours Meta's ink on this page (the colour setting changed): only items still in `from`
+  // (or all of them when `from` is null), so a mark the student recoloured keeps its colour.
+  recolor(from, to) {
+    const its = this.nb.metaItems().filter(it => from == null || it.color === from);
+    if (its.length) { this.nb.checkpoint(); for (const it of its) it.color = to; this.nb.redraw(); }
+    this.syncColor();
+    return its.length;
+  }
+
+  // Everything Meta has drawn on the SVG layer; baked marks are in nb.items, which nb.occupied covers.
+  metaBoxes() { return this.live.flatMap(m => m.pts.length > 1 ? [...m.boxes, ptsBox(m.pts)] : m.boxes); }
   isFree(box) { return !this.nb.occupied(box) && !this.metaBoxes().some(b => overlap(b, box)); }
   freeRow(r, x, w, n = 1) {
     for (let k = r; k < r + 30 && rowY(k + n - 1) < PAGE_H - 10; k++) {
@@ -233,26 +359,44 @@ export class MetaInk {
     return r;
   }
 
-  // ---- previews: Accept / Redo / Discard -------------------------------------------
-  setPending(m, on) { m.pending = !!on; m.g.classList.toggle('pending', !!on); }
-  pending() { return this.marks.filter(m => m.pending); }
+  // ---- previews: Accept / Redo / Discard (tap the faint ink itself to accept) -------------------
+  setPending(m, on) {
+    m.pending = !!on;
+    m.g.classList.toggle('pending', !!on);
+    m.g.classList.toggle('tap-target', !!on);
+    m.g.querySelector(':scope > rect.hit')?.remove();
+    if (!m.tap) {
+      // A finger or mouse tap on the faint ink accepts it. The Pencil writes through it: a stroke that
+      // starts here dismisses the preview and is kept, a Pencil tap accepts (see app.js beforeStroke).
+      m.tap = e => { if (!m.pending || e.pointerType === 'pen') return; e.stopPropagation(); this.decide(m.pid, 'accept'); };
+      m.g.addEventListener('click', m.tap);
+      m.g.addEventListener('pointerdown', e => { if (m.pending && e.pointerType !== 'pen') e.stopPropagation(); });
+    }
+  }
+  pending() { return this.live.filter(m => m.pending); }
   syncPills() {
     this.ui.replaceChildren();
     const groups = new Map();
-    for (const m of this.pending()) { if (!groups.has(m.pid)) groups.set(m.pid, []); groups.get(m.pid).push(m); }
+    for (const m of this.pending()) {
+      if (m.boxes.length && !m.g.querySelector(':scope > rect.hit')) {      // tap target over the faint ink
+        const b = unionBox(m.boxes);
+        m.g.prepend(svgEl('rect', { class: 'hit', x: b[0] - 4, y: b[1] - 4, width: b[2] + 8, height: b[3] + 8, rx: 6 }));
+      }
+      if (!groups.has(m.pid)) groups.set(m.pid, []); groups.get(m.pid).push(m); }
     for (const [pid, ms] of groups) {
       if (pid === this.redoing) continue;
       const boxes = ms.flatMap(m => m.boxes);
       if (!boxes.length) continue;
       const last = boxes.reduce((a, b) => (b[1] + b[3] > a[1] + a[3] ? b : a));
-      const k = 1 / Math.max(0.3, this.nb.scale || 1), W = 196 * k;
-      let x = last[0] + last[2] + 14, y = last[1] + last[3] / 2 - 13 * k;
+      const coarse = matchMedia('(pointer: coarse)').matches;
+      const k = 1 / Math.max(0.3, this.nb.scale || 1), W = (coarse ? 280 : 196) * k, H = coarse ? 22 : 13;
+      let x = last[0] + last[2] + 14, y = last[1] + last[3] / 2 - H * k;
       if (x + W > PAGE_W - 8) { x = clamp(Math.min(...boxes.map(b => b[0])), 8, PAGE_W - W - 8); y = Math.max(...boxes.map(b => b[1] + b[3])) + 6; }
       const bar = Object.assign(document.createElement('div'), { className: 'meta-pills' });
       bar.dataset.pid = pid;
       Object.assign(bar.style, { left: `${x}px`, top: `${y}px`, transform: `scale(${k})` });
       bar.addEventListener('pointerdown', e => e.stopPropagation());
-      for (const [act, label, title] of [['accept', 'Accept', 'Keep this ink'], ['redo', 'Redo', 'Ask Meta again'], ['discard', 'Discard', 'Remove this ink']]) {
+      for (const [act, label, title] of [['accept', 'Accept', 'Keep this ink (or tap the faint ink)'], ['redo', 'Redo', 'Ask Meta again'], ['discard', 'Discard', 'Remove this ink']]) {
         const b = Object.assign(document.createElement('button'), { type: 'button', textContent: label, title });
         b.dataset.act = act;
         b.onclick = e => { e.stopPropagation(); this.decide(pid, act); };
@@ -262,7 +406,7 @@ export class MetaInk {
     }
   }
   decide(pid, act) {
-    const ms = this.marks.filter(m => m.pending && m.pid === pid);
+    const ms = this.live.filter(m => m.pending && m.pid === pid);
     if (!ms.length) return;
     if (act === 'redo') {                              // pills hide while Meta writes it again
       this.redoing = pid; this.syncPills();
@@ -270,29 +414,49 @@ export class MetaInk {
       return;
     }
     this.nb.checkpoint();                              // Accept and Discard are undoable
-    if (act === 'accept') for (const m of ms) this.setPending(m, false);
+    if (act === 'accept') for (const m of ms) this.bake(m, { kept: true });     // real ink now; a new hint won't replace it
     else {
-      for (const m of ms) { m.g.classList.add('fade'); m.t = setTimeout(() => m.g.remove(), 380); }
-      this.marks = this.marks.filter(m => !ms.includes(m));
+      this.fadeOut(ms);
+      this.live = this.live.filter(m => !ms.includes(m));
     }
     this.syncPills();
     this.onCommit?.(act);
   }
+  // The preview under a page point (its marks' boxes, a little padded).
+  previewAt({ x, y }) { return this.pending().find(m => m.pid !== this.redoing && m.boxes.some(b => inBox(b, x, y, 6))) || null; }
+  // Dismiss a preview without an undo step of its own (the stroke written over it already took one).
+  dismiss(pid) {
+    const ms = this.live.filter(m => m.pending && m.pid === pid);
+    if (!ms.length) return false;
+    this.fadeOut(ms);
+    this.live = this.live.filter(m => !ms.includes(m));
+    this.syncPills();
+    this.onCommit?.('discard');
+    return true;
+  }
+  // Tap while Meta writes: finish everything still being written at once.
+  skip() { if (this.writing) this.fast = true; }
+
+  // Enter with a preview showing: accept the newest one.
+  acceptLatest() { const m = this.pending().at(-1); if (!m) return false; this.decide(m.pid, 'accept'); return true; }
 
   // ---- primitives --------------------------------------------------------------
   tween(ms, fn, token) {
+    if (this.fast) { fn(1); return Promise.resolve(); }
     return new Promise(res => {
       const t0 = performance.now();
       const step = now => {
         const t = clamp((now - t0) / ms, 0, 1);            // rAF time can be a little before t0
         fn(t);
-        if (t < 1 && token === this.run) requestAnimationFrame(step); else { fn(1); res(); }
+        if (t < 1 && token === this.run && !this.fast) requestAnimationFrame(step); else { fn(1); res(); }
       };
       requestAnimationFrame(step);
     });
   }
-  async stroke(m, pts, d, ms, token, width = 2.4, attrs = {}) {
+  // polys: the pen strokes in `d` as point lists (drawn through midpoints, as ink.js draws them).
+  async stroke(m, pts, d, ms, token, width = 2.4, attrs = {}, polys = [pts]) {
     const p = svgEl('path', { d, class: 'ink-stroke', 'stroke-width': width, ...attrs }, m.g);
+    p._polys = polys;
     m.pts.push(...pts);
     const len = p.getTotalLength() + 1;
     p.style.strokeDasharray = `${len} ${len}`;
@@ -304,11 +468,17 @@ export class MetaInk {
   async hand(m, box, x, base, em, token, { label = '', attrs = {}, maxMs = 2500, speed = 1, instant = false, reveal = true, width } = {}) {
     const g = svgEl('g', { class: 'hw', 'data-text': label }, m.g);
     const w = (width ?? penWidth(em)).toFixed(2);
-    const els = box.paths.map(p => svgEl('path', { d: pathD(p, em, x, base), class: 'ink-stroke', 'stroke-width': w, ...attrs }, g));
+    const els = box.paths.map(p => {
+      const e = svgEl('path', { d: pathD(p, em, x, base), class: 'ink-stroke', 'stroke-width': w, ...attrs }, g);
+      const pts = [];
+      for (let i = 0; i + 1 < p.length; i += 2) pts.push([x + p[i] * em, base + p[i + 1] * em]);
+      e._polys = [pts];
+      return e;
+    });
     const rect = [x - 4, base - box.h * em - 3, box.w * em + 8, (box.h + box.d) * em + 6];
     m.boxes.push(rect);
     if (reveal) this.onReveal?.(rect);
-    if (instant || !els.length || token !== this.run) return rect;
+    if (instant || this.fast || !els.length || token !== this.run) return rect;
     const { times, end } = penTimes(box.paths.map(p => p.map((v, i) => (i % 2 ? base : x) + v * em)), { speed });
     const total = Math.min(end, maxMs), k = end / total;
     const lens = els.map(e => e.getTotalLength() + 0.5), done = els.map(() => -1);
@@ -376,8 +546,8 @@ export class MetaInk {
     const ang = Math.atan2(to[1] - ctrl[1], to[0] - ctrl[0]), L = 10;
     const h1 = [to[0] - L * Math.cos(ang - 0.5), to[1] - L * Math.sin(ang - 0.5)];
     const h2 = [to[0] - L * Math.cos(ang + 0.5), to[1] - L * Math.sin(ang + 0.5)];
-    const d = `M${from[0]} ${from[1]} Q${ctrl[0]} ${ctrl[1]} ${to[0]} ${to[1]} M${h1[0]} ${h1[1]} L${to[0]} ${to[1]} L${h2[0]} ${h2[1]}`;
-    return { d, pts };
+    const d = `${smoothPath(pts)} M${h1[0]} ${h1[1]} L${to[0]} ${to[1]} L${h2[0]} ${h2[1]}`;
+    return { d, pts, polys: [pts, [h1, to, h2]] };
   }
 
   // ---- annotations -------------------------------------------------------------
@@ -393,13 +563,19 @@ export class MetaInk {
     return { n, base: r => rowY(r) - RULE + 2 + (n * RULE - (h + d)) / 2 + h };
   }
 
-  async render(resp, sentLines, ask = null) {
+  // spare: keep the previous reply's marks (set for a command that was queued behind it).
+  async render(resp, sentLines, ask = null, { spare = false } = {}) {
     // Typeset and graph ink stack with hints; each kind of answer replaces only its own kind.
-    const EXTRAS = new Set(['typeset', 'graph']);
+    // The first-run tip stays until the student erases it.
+    const EXTRAS = new Set(['typeset', 'graph', 'tip']);
     const kinds = new Set((resp.annotations || []).map(a => a.kind));
     const extrasOnly = kinds.size > 0 && [...kinds].every(k => EXTRAS.has(k));
-    if (extrasOnly) this.clearKinds(kinds);
-    else this.clearKinds(new Set(this.marks.map(m => m.kind).filter(k => !EXTRAS.has(k))));
+    const keep = spare ? this.pid : null;
+    if (extrasOnly) this.clearKinds(kinds, keep);
+    else this.clearKinds(new Set(this.marks.map(m => m.kind).filter(k => !EXTRAS.has(k))), keep);
+    this.nb.redraw(); this.syncColor();
+    this.writing = true;
+    this.fast = matchMedia('(prefers-reduced-motion: reduce)').matches;     // reduced motion: ink appears at once
     const token = this.run;
     this.byId = new Map(sentLines.map(l => [l.id, l]));
     for (const l of resp.lines || []) this.byId.set(l.id, { ...this.byId.get(l.id), ...l, bbox: l.bbox?.length === 4 ? l.bbox : this.byId.get(l.id)?.bbox });
@@ -418,13 +594,46 @@ export class MetaInk {
     const order = { tick: 0, circle: 1, underline: 2, note: 3, ghost: 4, write: 5, typeset: 6, graph: 7 };
     const todo = anns.filter(a => a.kind in order).sort((a, b) => order[a.kind] - order[b.kind]);
     if (!todo.length && resp.verdict) todo.push({ kind: 'note', target: null, text: resp.verdict });
-    for (const a of todo) {
-      if (token !== this.run) return;
-      try { await this[`a_${a.kind}`](a, token); } catch (err) { console.warn('[margin] skipped annotation', a, err); }
-      await sleep(a.kind === 'tick' ? 40 : 140);
+    const pid = this.pid;
+    try {
+      for (const a of todo) {
+        if (token !== this.run) return todo.length;
+        const before = new Set(this.live);
+        try { await this[`a_${a.kind}`](a, token); } catch (err) { console.warn('[margin] skipped annotation', a, err); }
+        // Meta lifted the pen: what it just wrote becomes notebook ink (previews wait for Accept).
+        if (token === this.run) for (const m of this.live.filter(m => !before.has(m) && !m.pending && m.kind !== 'read')) this.bake(m);
+        if (!this.fast) await sleep(a.kind === 'tick' ? 40 : 140);
+      }
+      if (token === this.run) this.syncPills();
+      return todo.length;
+    } finally {
+      if (this.pid === pid) { this.writing = false; this.fast = false; }   // never left "writing" (it gates the queue)
     }
-    if (token === this.run) this.syncPills();
-    return todo.length;
+  }
+
+  // First-run tip: two short lines in Meta's hand, right-aligned in the space between the page header
+  // and the first rule (a new page is empty there), as ordinary erasable by:'meta' ink. Kept, so a reply
+  // never replaces it; never sent to Meta (by:'meta' ink is left out of what Meta reads).
+  async writeTip(lines = ['Tap the mic or press / to ask me', 'scribble to erase · hold to move']) {
+    const em = 17, right = PAGE_W - 40, bases = [rowY(0) - 40, rowY(0) - 15];
+    const boxes = lines.map(t => this.box_(() => textBox(t)));
+    if (boxes.some(b => !b)) return false;
+    const w = Math.max(...boxes.map(b => b.w * em));
+    const area = [right - w - 6, bases[0] - em, w + 12, bases[1] - bases[0] + em * 1.4];
+    if (!this.isFree(area)) return false;
+    this.syncColor();
+    this.pid = `tip${Date.now().toString(36)}`;
+    const m = this.mark('tip'), token = this.run;
+    m.g.setAttribute('aria-label', lines.join(' · '));
+    this.writing = true;
+    try {
+      for (let i = 0; i < lines.length; i++) await this.hand(m, boxes[i], right - boxes[i].w * em, bases[i], em, token, { label: lines[i], maxMs: 1400, reveal: false, width: 1.5 });
+      if (!this.live.includes(m)) return false;
+      if (token !== this.run) { m.g.remove(); this.live = this.live.filter(x => x !== m); return false; }
+      const [it] = this.bake(m, { kept: true });
+      if (it) it.say = lines.join(' · ');
+      return !!it;
+    } finally { this.writing = false; this.fast = false; }
   }
 
   readLabel(l) {
@@ -537,10 +746,9 @@ export class MetaInk {
       from = [x - 12, bases[0] - em * 0.35]; to = [b[0] - 8, b[1] + b[3] * 0.6]; ctrl = [b[0] - 34, from[1] - 6];   // curl up the left edge
     }
     const arr = this.arrow(from, to, ctrl);
-    await this.stroke(m, arr.pts, arr.d, 280, token, 2.2);
+    await this.stroke(m, arr.pts, arr.d, 280, token, 2.2, {}, arr.polys);
     await writeAll(lines, x, bases);
     m.note = { kind: 'note', target: a.target ?? null, text: a.text };
-    this.makeTappable(m);                            // tap a hint to get a more specific one
   }
 
   // Lines of a write/ghost: LaTeX rows when the server sent `latex`, else the text's own lines.
@@ -684,9 +892,10 @@ export class MetaInk {
     // axes through the origin when it is in view, else along the edges
     const ax = y0 <= 0 && y1 >= 0 ? sy(0) : B, ay = x0 <= 0 && x1 >= 0 ? sx(0) : L;
     const xAxis = wob([L - 6, ax], [R + 4, ax]), yAxis = wob([ay, B + 4], [ay, T - 8]);
-    const head = (tip, dir) => dir === 'x' ? `M${tip[0] - 7} ${tip[1] - 4} L${tip[0]} ${tip[1]} L${tip[0] - 7} ${tip[1] + 4}` : `M${tip[0] - 4} ${tip[1] + 7} L${tip[0]} ${tip[1]} L${tip[0] + 4} ${tip[1] + 7}`;
-    await this.stroke(m, xAxis, smoothPath(xAxis) + head(xAxis.at(-1), 'x'), 260, token, 1.5, { opacity: 0.55 });
-    await this.stroke(m, yAxis, smoothPath(yAxis) + head(yAxis.at(-1), 'y'), 220, token, 1.5, { opacity: 0.55 });
+    const headPts = (tip, dir) => dir === 'x' ? [[tip[0] - 7, tip[1] - 4], tip, [tip[0] - 7, tip[1] + 4]] : [[tip[0] - 4, tip[1] + 7], tip, [tip[0] + 4, tip[1] + 7]];
+    const head = (tip, dir) => { const [a, b, c] = headPts(tip, dir); return ` M${a[0]} ${a[1]} L${b[0]} ${b[1]} L${c[0]} ${c[1]}`; };
+    await this.stroke(m, xAxis, smoothPath(xAxis) + head(xAxis.at(-1), 'x'), 260, token, 1.5, { opacity: 0.55 }, [xAxis, headPts(xAxis.at(-1), 'x')]);
+    await this.stroke(m, yAxis, smoothPath(yAxis) + head(yAxis.at(-1), 'y'), 220, token, 1.5, { opacity: 0.55 }, [yAxis, headPts(yAxis.at(-1), 'y')]);
     for (const [t, x, y] of [['x', R + 2, ax + 16], ['y', ay + 7, T - 2]]) {
       const lb = this.box_(() => textBox(t));
       if (lb) await this.hand(m, lb, x, y, 20, token, { label: t, attrs: { opacity: 0.7 }, maxMs: 100, reveal: false, width: 1.4 });

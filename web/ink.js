@@ -6,6 +6,23 @@
 //   { type: 'textbox', x, y, w, text, color }                           text rows split on \n, wrapped to w
 //   { type: 'image', blob, x, y, w, h, bg? }                            blob: id in store.blobs; bg: page background
 // Older pages hold { type: 'text', text, x, row, baseline, color } lines: normalizeItem turns them into text boxes.
+//
+// Meta's handwriting lives here too, one item per mark (a hint, a tick, an answer line), tagged by: 'meta'
+// once Meta has finished writing it:
+//   { type: 'ink', color, segs: [{ p: [[x, y], ...], w, o? }] }      its pen strokes, constant width w,
+//                                                                   drawn through the same midpoints as Meta's pen;
+//                                                                   the eraser and scratch-out remove single segs
+//   { type: 'mark', html, box0, x, y, color, polys? }               a mark that is not plain strokes (shaded graphs):
+//                                                                   finished SVG markup, moved by (x, y)
+//   both with by, mk (note, tick, circle, write…), grp, say? / note? (its words), kept? (accepted, moved or
+//   recoloured: Meta's next reply leaves it alone), dim? (an old hint faded once the student wrote on below it)
+// Round-1 pages stored Meta's ink as one { type: 'stroke', mono: true, by: 'meta', grp } item per pen stroke:
+// mergeMetaStrokes turns those into ink items when the page loads.
+// Ownership rule: items with by: 'meta' are Meta's, and are left out of everything Meta reads (snapshot,
+// inkRows, lines, signature, hasStrokes), so Meta never grades its own hint. The student can erase, lasso,
+// move and recolour them like their own ink without changing that; moving a hint out of the way does not
+// make it theirs. Only an explicit "Keep as mine" (lasso bar) adopts them: by becomes 'student-adopted',
+// they take the student's pen colour and Meta reads them from then on. Older items have no `by` (student).
 import { getStroke } from './vendor/perfect-freehand.js';   // vendored, MIT (web/vendor/perfect-freehand.LICENSE)
 import { imageFor, loadItemImages } from './images.js';
 
@@ -21,6 +38,11 @@ export const HL_SIZE = 22, HL_ALPHA = 0.42;
 export const HL_COLORS = ['#ffd426', '#7fe07a', '#ff86c3'];
 
 const mctx = document.createElement('canvas').getContext('2d');
+export const isMeta = it => it?.by === 'meta';
+const mine = it => !isMeta(it);
+// Painter for type 'mark' items (Meta's graphs); assistant.js registers it, so ink.js needs no SVG code.
+let markPainter = null;
+export function setMarkPainter(fn) { markPainter = fn; }
 const inBox = ([x, y, w, h], px, py, pad = 0) => px >= x - pad && px <= x + w + pad && py >= y - pad && py <= y + h + pad;
 const overlap = (a, b) => a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3];
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -64,8 +86,56 @@ function polyline(pts) {
 
 // Pen: pressure-shaped outline (Apple Pencil pressure; simulated from speed for mouse and finger).
 // Highlighter: a constant-width translucent band.
+// Ink items (Meta's marks): every seg gets its path and box once.
+function segGeometry(seg) {
+  if (!seg._path) {
+    seg._path = polyline(seg.p.length > 1 ? seg.p : [seg.p[0], [seg.p[0][0] + 0.4, seg.p[0][1] + 0.3]]);
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [x, y] of seg.p) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+    const pad = (seg.w || 2) * 1.5;
+    seg._box = [x0 - pad, y0 - pad, x1 - x0 + 2 * pad, y1 - y0 + 2 * pad];
+  }
+  return seg;
+}
+const segHit = (seg, x, y, R) => inBox(segGeometry(seg)._box, x, y, R) && nearLine(seg.p, x, y, R + (seg.w || 2) / 2);
+const pointsOf = it => it.type === 'ink' ? it.segs.flatMap(sg => sg.p) : it.pts || [];
+
+// Round-1 per-stroke Meta items -> one ink item per mark (kept at the first stroke's place).
+export function mergeMetaStrokes(items) {
+  const groups = new Map(), out = [];
+  for (const it of items) {
+    if (!(it.type === 'stroke' && it.mono && it.by === 'meta' && it.grp)) { out.push(it); continue; }
+    let g = groups.get(it.grp);
+    if (!g) {
+      g = { type: 'ink', color: it.color, segs: [] };
+      for (const k of ['by', 'mk', 'grp', 'say', 'note', 'kept']) if (it[k] != null) g[k] = it[k];
+      groups.set(it.grp, g); out.push(g);
+    }
+    g.say ??= it.say; g.note ??= it.note; if (it.kept) g.kept = true;
+    g.segs.push({ p: it.pts.map(([x, y]) => [x, y]), w: it.size, ...(it.op != null ? { o: it.op } : {}) });
+  }
+  return out;
+}
+
+// A quick back-and-forth zigzag (scratch-out): at least 3 sideways reversals, flatter than it is wide.
+export function isScratch(pts) {
+  if (pts.length < 8) return false;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  const w = x1 - x0, h = y1 - y0;
+  if (w < 24 || w > 320 || h > Math.max(40, w * 0.7) || h > 90) return false;
+  let dir = 0, turns = 0, ext = pts[0][0], travel = 0;
+  for (let i = 1; i < pts.length; i++) travel += Math.abs(pts[i][0] - pts[i - 1][0]);
+  for (const [x] of pts) {
+    if (!dir) { if (Math.abs(x - pts[0][0]) > 8) { dir = Math.sign(x - pts[0][0]); ext = x; } continue; }
+    if ((x - ext) * dir > 0) ext = x;                       // further the same way
+    else if (Math.abs(x - ext) > 8) { turns++; dir = -dir; ext = x; }   // came back: a reversal
+  }
+  return turns >= 3 && travel > w * 3;
+}
+
 function strokeGeometry(s, last = true) {
-  if (s.hl) return { path: polyline(s.pts), fill: false };
+  if (s.hl || s.mono) return { path: polyline(s.pts), fill: false };
   const outline = getStroke(s.pts, { size: s.size * 2, thinning: 0.6, smoothing: 0.55, streamline: 0.4, simulatePressure: s.sim, last });
   return { path: outlineToPath(outline), fill: true };
 }
@@ -98,7 +168,25 @@ export function paint(c, it) {
     }
     return;
   }
+  if (it.type === 'mark') {
+    if (it.dim) { c.save(); c.globalAlpha = 0.4; }
+    markPainter?.(c, it);
+    if (it.dim) c.restore();
+    return;
+  }
   c.fillStyle = c.strokeStyle = it.color;
+  if (it.type === 'ink') {
+    c.save();
+    c.lineCap = c.lineJoin = 'round';
+    const k = it.dim ? 0.4 : 1;
+    for (const seg of it.segs) {
+      segGeometry(seg);
+      c.globalAlpha = (seg.o ?? 1) * k; c.lineWidth = seg.w || 2;
+      c.stroke(seg._path);
+    }
+    c.restore();
+    return;
+  }
   if (it.type === 'textbox') {
     c.font = `${TEXT_PX}px ${STUDENT_FONT}`;
     it.rows.forEach((r, i) => r && c.fillText(r, it.x, rowBaseline(it, i)));
@@ -112,8 +200,10 @@ export function paint(c, it) {
     c.restore();
     return;
   }
+  if (it.op != null) { c.save(); c.globalAlpha = it.op; }
   if (it.fill) c.fill(it.path);
   else { c.lineWidth = it.size; c.lineCap = c.lineJoin = 'round'; c.stroke(it.path); }
+  if (it.op != null) c.restore();
 }
 
 // Layer order: page background, images, highlighter, then pen ink and text on top.
@@ -122,13 +212,18 @@ export function paintItems(c, items) {
   for (let k = 0; k <= 3; k++) for (const it of items) if (layer(it) === k && !it.editing) paint(c, it);
 }
 
+const nearLine = (p, x, y, r) => {
+  if (p.length === 1) return Math.hypot(p[0][0] - x, p[0][1] - y) < r;
+  for (let i = 0; i < p.length - 1; i++) if (distSeg(x, y, p[i][0], p[i][1], p[i + 1][0], p[i + 1][1]) < r) return true;
+  return false;
+};
 function hits(it, { x, y }, R) {
   if (it.type === 'image') return false;             // the eraser leaves pictures alone (lasso + delete removes them)
   if (!inBox(it.bbox, x, y, R)) return false;
   if (it.type === 'textbox') return true;
-  const p = it.pts, r = R + it.size / 2;
-  for (let i = 0; i < p.length - 1; i++) if (distSeg(x, y, p[i][0], p[i][1], p[i + 1][0], p[i + 1][1]) < r) return true;
-  return false;
+  if (it.type === 'mark') return !it.polys?.length || it.polys.some(p => nearLine(p, x - it.x, y - it.y, R + 2));
+  if (it.type === 'ink') return it.segs.some(sg => segHit(sg, x, y, R));
+  return nearLine(it.pts, x, y, R + it.size / 2);
 }
 
 // Offset from an editor's top edge to its text baseline for a given line height.
@@ -161,34 +256,58 @@ export function prepareItem(it) {
     it.rowBoxes = it.rows.map((r, i) => r.trim() && [it.x, rowBaseline(it, i) - 24, mctx.measureText(r).width, 32]).filter(Boolean);
   } else if (it.type === 'image') {
     it.bbox = [it.x, it.y, it.w, it.h];
+  } else if (it.type === 'ink') {
+    const bs = it.segs.map(sg => segGeometry(sg)._box);
+    it.bbox = bs.length ? union(bs) : [0, 0, 0, 0];
+  } else if (it.type === 'mark') {
+    it.x ??= 0; it.y ??= 0;
+    const b = it.box0 || [0, 0, 1, 1];
+    it.bbox = [b[0] + it.x, b[1] + it.y, b[2], b[3]];
   }
   return it;
 }
 
 // Plain JSON for storage: no Path2D, rounded coordinates.
 const r2 = v => Math.round(v * 100) / 100;
+const META_KEYS = ['by', 'mk', 'grp', 'say', 'note', 'kept', 'dim', 'rid'];
+const withMeta = (s, it) => { for (const k of META_KEYS) if (it[k] != null && it[k] !== false) s[k] = it[k]; return s; };
 export function serializeItem(it) {
   if (it.type === 'stroke') {
     const s = { type: 'stroke', color: it.color, size: it.size, sim: !!it.sim, pts: it.pts.map(([x, y, p]) => [r2(x), r2(y), Math.round((p ?? 0.5) * 1000) / 1000]) };
     if (it.hl) s.hl = true;
-    return s;
+    if (it.mono) s.mono = true;
+    if (it.op != null) s.op = it.op;
+    return withMeta(s, it);
   }
   if (it.type === 'image') { const s = { type: 'image', blob: it.blob, x: r2(it.x), y: r2(it.y), w: r2(it.w), h: r2(it.h) }; if (it.bg) s.bg = true; return s; }
-  return { type: 'textbox', x: r2(it.x), y: r2(it.y), w: r2(it.w), text: it.text, color: it.color };
+  if (it.type === 'ink') {
+    const segs = it.segs.map(sg => ({ p: sg.p.map(([x, y]) => [r2(x), r2(y)]), w: sg.w, ...(sg.o != null ? { o: sg.o } : {}) }));
+    return withMeta({ type: 'ink', color: it.color, segs }, it);
+  }
+  if (it.type === 'mark') {
+    const s = { type: 'mark', html: it.html, box0: it.box0, x: r2(it.x || 0), y: r2(it.y || 0), color: it.color };
+    if (it.polys?.length) s.polys = it.polys;
+    return withMeta(s, it);
+  }
+  return withMeta({ type: 'textbox', x: r2(it.x), y: r2(it.y), w: r2(it.w), text: it.text, color: it.color }, it);
 }
 const cloneItem = it => ({ ...it, editing: false });
 
 export class Notebook {
   // paper: optional canvas under the ink, painted by paintPaper(ctx, style) at the same resolution.
   // onSelect(box|null): the lasso selection changed (box in page coords).
-  constructor({ page, ink, live, paper, paintPaper, scroller, onErase, onChange, onSelect }) {
-    Object.assign(this, { page, ink, live, paper, paintPaper, scroller, onErase, onChange, onSelect });
+  // onLongPress(item): the pen or a finger rested ~0.5 s on one of Meta's strokes (per-mark menu).
+  // beforeStroke(stroke, { tap }) -> true: the pen stroke was used up (a tap on Meta's preview, skip…).
+  // afterStroke(stroke): it was added (Meta's preview under it is dismissed, old hints fade…).
+  constructor({ page, ink, live, paper, paintPaper, scroller, onErase, onChange, onSelect, onLongPress, beforeStroke, afterStroke }) {
+    Object.assign(this, { page, ink, live, paper, paintPaper, scroller, onErase, onChange, onSelect, onLongPress, beforeStroke, afterStroke });
     this.paperStyle = 'ruled';
     this.items = []; this.history = []; this.future = [];
     this.ext = null;                                  // { save, load }: extra state (Meta's ink) kept in undo snapshots
     this.tool = 'pen'; this.color = '#1f3a7a'; this.size = PEN_SIZES.medium; this.hlColor = HL_COLORS[0]; this.scale = 1;
     this.lastPoint = { x: 320, y: 220 }; this.penSeen = false; this.active = null; this.cursor = null;
     this.sel = []; this.lasso = null; this.drag = null;
+    this.metaHidden = false;                          // "Hide Meta's ink": by:'meta' items are not drawn or touched
     this.ctx = ink.getContext('2d'); this.lctx = live.getContext('2d');
     for (const t of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) page.addEventListener(t, e => this[t](e));
     page.addEventListener('pointerleave', () => { if (!this.active) { this.cursor = null; this.renderLive(); } });
@@ -229,7 +348,7 @@ export class Notebook {
 
   // ---- pointer input -------------------------------------------------------
   pointerdown(e) {
-    if (e.target.closest('.tbox-ui, .tap-target, .sel-bar')) return;
+    if (e.target.closest('.tbox-ui, .sel-bar') || (e.pointerType !== 'pen' && e.target.closest('.tap-target'))) return;   // the Pencil writes through Meta's previews
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (e.pointerType === 'pen') this.penSeen = true;
     e.preventDefault();
@@ -243,6 +362,10 @@ export class Notebook {
       const hl = this.tool === 'highlighter';
       this.cur = { type: 'stroke', color: hl ? this.hlColor : this.color, size: hl ? HL_SIZE : this.size, sim: e.pointerType !== 'pen', pts: [[pt.x, pt.y, pt.p]] };
       if (hl) this.cur.hl = true;
+      this.cur.t0 = performance.now(); this.cur.ptype = e.pointerType;
+      // Long-press menu on Meta's ink: fingers and mouse only. A resting Pencil is about to write.
+      const hit = !hl && e.pointerType !== 'pen' && this.onLongPress && this.metaAt(pt);
+      if (hit) this.press = { x: pt.x, y: pt.y, t: setTimeout(() => this.longPress(hit), 520) };
     } else if (this.tool === 'lasso') this.lassoDown(pt);
     else { this.pending = this.snap(); this.erasedAny = false; this.eraseAt(pt); }
     this.cursor = pt; this.renderLive();
@@ -255,6 +378,7 @@ export class Notebook {
       return;
     }
     if (this.drag) { this.dragTo(this.pos(e)); return; }
+    if (this.press) { const q = this.pos(e); if (Math.hypot(q.x - this.press.x, q.y - this.press.y) > 6 / this.scale) this.cancelPress(); }
     const evs = e.getCoalescedEvents?.() ?? [];
     for (const ev of evs.length ? evs : [e]) {
       const q = this.pos(ev);
@@ -269,12 +393,18 @@ export class Notebook {
     const a = this.active;
     if (!a || e.pointerId !== a.id) return;
     this.active = null;
+    this.cancelPress();
     if (this.cur) {
       const s = this.cur; this.cur = null;
+      const p0 = s.pts[0], tap = performance.now() - s.t0 < 300 && s.pts.every(([x, y]) => Math.hypot(x - p0[0], y - p0[1]) < 6 / Math.max(0.3, this.scale));
+      const ptype = s.ptype; delete s.t0; delete s.ptype;
+      if (this.beforeStroke?.(s, { tap, ptype })) { this.renderLive(); return; }
+      if (!s.hl && this.scratchOut(s.pts)) { this.renderLive(); return; }
       if (s.pts.length === 1) s.pts.push([s.pts[0][0] + 0.4, s.pts[0][1] + 0.4, s.pts[0][2]]);
       this.prepare(s);
       this.checkpoint(); this.items.push(s);
       if (!s.hl) { const [x, y] = s.pts.at(-1); this.lastPoint = { x, y }; }
+      this.afterStroke?.(s);
       this.redraw(); this.onChange?.('stroke');
     } else if (this.drag) this.dragEnd();
     else if (this.lasso) this.lassoEnd();
@@ -288,6 +418,7 @@ export class Notebook {
   // A second finger arrived: drop the half-drawn stroke, the gesture is a pinch.
   cancelActive() {
     if (!this.active) return;
+    this.cancelPress();
     this.active = null; this.cur = null; this.cursor = null; this.lasso = null;
     if (this.drag) { this.dragEnd(); }
     if (this.erasedAny) this.onChange?.('erase');
@@ -295,11 +426,93 @@ export class Notebook {
     this.renderLive();
   }
 
+  // Removes what `hitItem` hits; ink items lose only the segs `hitSeg` hits. Returns whether anything went.
+  cut(hitItem, hitSeg) {
+    let dirty = false;
+    const out = [];
+    for (const it of this.items) {
+      if (this.metaHidden && isMeta(it)) { out.push(it); continue; }
+      if (it.type === 'ink') {
+        const keep = it.segs.filter(sg => !hitSeg(sg));
+        if (keep.length === it.segs.length) { out.push(it); continue; }
+        dirty = true;
+        if (keep.length) { it.segs = keep; prepareItem(it); out.push(it); }
+        continue;
+      }
+      if (hitItem(it)) { dirty = true; continue; }
+      out.push(it);
+    }
+    if (dirty) { this.items = out; this.sel = this.sel.filter(it => out.includes(it)); }
+    return dirty;
+  }
+  // Scratch-out: a zigzag over ink erases the ink it covers (student's or Meta's), in one undo step.
+  // A zigzag over empty paper is ordinary writing.
+  scratchOut(pts) {
+    if (!isScratch(pts)) return false;
+    const near = (x, y) => { for (let i = 0; i < pts.length - 1; i++) if (distSeg(x, y, pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1]) < 9) return true; return false; };
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    const gb = [Math.min(...xs) - 6, Math.min(...ys) - 6, Math.max(...xs) - Math.min(...xs) + 12, Math.max(...ys) - Math.min(...ys) + 12];
+    const covered = ps => ps.some(([x, y]) => inBox(gb, x, y) && near(x, y));
+    const before = this.snap();
+    const typed = this.scratchText(gb);
+    const dirty = typed | this.cut(it => (it.type === 'stroke' || it.type === 'mark') && overlap(it.bbox, gb) && covered(it.type === 'mark' ? (it.polys || []).flat().map(([x, y]) => [x + it.x, y + it.y]) : it.pts),
+      sg => overlap(segGeometry(sg)._box, gb) && covered(sg.p));
+    if (!dirty) {                     // a zigzag over typed text that missed every word: drop it, no smudge
+      return this.items.some(it => it.type === 'textbox' && !it.editing && (it.rowBoxes || []).some(b => overlap(b, gb)));
+    }
+    this.history.push(before); this.future = [];
+    this.redraw(); this.notifySelect(); this.onChange?.('erase');
+    return true;
+  }
+  // Scratch-out over typed text: the words whose middle the zigzag covers go (a box left empty goes too).
+  scratchText(gb) {
+    const cy = gb[1] + gb[3] / 2, x0 = gb[0] + 6, x1 = gb[0] + gb[2] - 6;
+    let dirty = false;
+    textFont();
+    for (const it of [...this.items]) {
+      if (it.type !== 'textbox' || it.editing || (this.metaHidden && isMeta(it)) || !overlap(it.bbox, gb)) continue;
+      const paras = String(it.text).split('\n').map(p => wrapRows(p, it.w));
+      let i = 0, hit = false;
+      for (const rows of paras) rows.forEach((row, j) => {
+        const base = rowBaseline(it, i++);
+        if (cy < base - 26 || cy > base + 10) return;
+        let x = it.x;
+        const kept = row.split(/(\s+)/).filter(w => {
+          const wx = x, ww = mctx.measureText(w).width; x += ww;
+          const gone = w.trim() && wx + ww / 2 >= x0 && wx + ww / 2 <= x1;
+          if (gone) hit = true;
+          return !gone;
+        });
+        rows[j] = kept.join('').replace(/\s+/g, ' ').trim();
+      });
+      if (!hit) continue;
+      dirty = true;
+      const text = paras.map(rows => rows.filter(Boolean).join(' ')).join('\n').replace(/^\n+|\n+$/g, '');
+      if (text.trim()) { it.text = text; prepareItem(it); }
+      else { this.items = this.items.filter(x => x !== it); this.sel = this.sel.filter(x => x !== it); }
+    }
+    return dirty;
+  }
+  cancelPress() { if (this.press) { clearTimeout(this.press.t); this.press = null; } }
+  longPress(it) {
+    this.press = null;
+    if (!this.active || !this.cur) return;
+    this.active = null; this.cur = null; this.cursor = null;      // the resting pen drew nothing
+    this.renderLive();
+    this.onLongPress?.(it);
+  }
+  // Meta's topmost item under a point (ignored while Meta's ink is hidden).
+  metaAt(pt) {
+    if (this.metaHidden) return null;
+    for (let i = this.items.length - 1; i >= 0; i--) { const it = this.items[i]; if (isMeta(it) && hits(it, pt, 6)) return it; }
+    return null;
+  }
+
   eraseAt(pt) {
     const R = 10;
     const before = this.items.length;
-    this.items = this.items.filter(it => !hits(it, pt, R));
-    const dirty = this.items.length !== before;
+    let dirty = this.cut(it => hits(it, pt, R), sg => segHit(sg, pt.x, pt.y, R));
+    dirty ||= this.items.length !== before;
     const metaHit = this.onErase?.(pt, R);
     if ((dirty || metaHit) && !this.erasedAny && this.pending) { this.history.push(this.pending); this.future = []; this.erasedAny = true; }
     if (dirty) this.redraw();
@@ -318,7 +531,7 @@ export class Notebook {
     const near = hp && Math.hypot(pt.x - hp[0], pt.y - hp[1]) < 22 / Math.min(1, this.scale);
     if (near || (this.sel.length && inBox(this.selBox(), pt.x, pt.y, 4))) {
       this.drag = { kind: near ? 'resize' : 'move', x: pt.x, y: pt.y, moved: false, before: this.snap(),
-        orig: this.sel.map(it => ({ it, x: it.x, y: it.y, w: it.w, h: it.h, bw: it.bbox[2], pts: it.pts })) };
+        orig: this.sel.map(it => ({ it, x: it.x, y: it.y, w: it.w, h: it.h, bw: it.bbox[2], pts: it.pts, segs: it.segs })) };
       this.onSelect?.(null);                            // hide the action bar while dragging
       return;
     }
@@ -333,6 +546,8 @@ export class Notebook {
       const it = o.it;
       if (d.kind === 'move') {
         if (it.type === 'stroke') it.pts = o.pts.map(([x, y, p]) => [x + dx, y + dy, p]);
+        else if (it.type === 'mark') { it.x = (o.x || 0) + dx; it.y = (o.y || 0) + dy; }
+        else if (it.type === 'ink') it.segs = o.segs.map(sg => ({ ...sg, _path: null, p: sg.p.map(([x, y]) => [x + dx, y + dy]) }));
         else { it.x = o.x + dx; it.y = o.y + dy; }
       } else if (it.type === 'image') {
         it.w = clamp(o.w + dx, 40, PAGE_W * 1.5); it.h = it.w * o.h / o.w;
@@ -345,24 +560,30 @@ export class Notebook {
   }
   dragEnd() {
     const d = this.drag; this.drag = null;
-    if (d.moved) { this.history.push(d.before); this.future = []; this.onChange?.(d.kind); }
+    if (d.moved) {
+      this.history.push(d.before); this.future = [];
+      for (const it of this.sel) if (isMeta(it)) { it.kept = true; delete it.dim; }   // moved on purpose: Meta's next reply leaves it
+      this.onChange?.(d.kind);
+    }
     this.notifySelect();
   }
   lassoEnd() {
     const poly = this.lasso; this.lasso = null;
     let len = 0;
     for (let i = 1; i < poly.length; i++) len += Math.hypot(poly[i][0] - poly[i - 1][0], poly[i][1] - poly[i - 1][1]);
-    const pick = this.items.filter(it => !it.bg);
+    const pick = this.items.filter(it => !it.bg && !(this.metaHidden && isMeta(it)));
     let sel;
     if (len < 16) {                                    // a tap: the topmost thing under it
       const [x, y] = poly[0];
       const hit = [...pick].reverse()                  // latest first, then the top layer wins
-        .filter(it => it.type === 'stroke' ? hits(it, { x, y }, 8) : inBox(it.bbox, x, y, 4))
+        .filter(it => it.type === 'stroke' || it.type === 'ink' ? hits(it, { x, y }, 8) : inBox(it.bbox, x, y, 4))
         .sort((a, b) => layer(b) - layer(a));
       sel = hit.slice(0, 1);
+      // Tapping one of Meta's strokes picks up the whole mark (a hint, an answer line), ready to move.
+      if (isMeta(sel[0]) && sel[0].grp) sel = pick.filter(it => isMeta(it) && it.grp === sel[0].grp);
     } else {
       sel = pick.filter(it => {
-        if (it.type === 'stroke') { const n = it.pts.filter(([x, y]) => inPoly(poly, x, y)).length; return n >= it.pts.length * 0.6; }
+        if (it.type === 'stroke' || it.type === 'ink') { const ps = pointsOf(it), n = ps.filter(([x, y]) => inPoly(poly, x, y)).length; return n >= ps.length * 0.6; }
         const [x, y, w, h] = it.bbox;
         return inPoly(poly, x + w / 2, y + h / 2);
       });
@@ -377,13 +598,37 @@ export class Notebook {
     this.onChange?.('delete');
     return true;
   }
+  // "Keep as mine": Meta's ink in the selection becomes the student's (their pen colour, read by Meta).
+  adoptSelection(color = this.color) {
+    const targets = this.sel.filter(isMeta);
+    if (!targets.length) return false;
+    this.checkpoint();
+    for (const it of targets) { it.by = 'student-adopted'; it.color = color; delete it.kept; delete it.dim; }
+    this.redraw(); this.renderLive(); this.notifySelect(); this.onChange?.('adopt');
+    return true;
+  }
+  metaItems() { return this.items.filter(isMeta); }
+  // Drops Meta's items matching `pred` (no checkpoint: callers decide). Returns how many went.
+  removeMeta(pred = () => true) {
+    const n = this.items.length;
+    this.items = this.items.filter(it => !(isMeta(it) && pred(it)));
+    if (this.items.length === n) return 0;
+    this.sel = this.sel.filter(it => this.items.includes(it));
+    this.redraw(); this.renderLive(); this.notifySelect();
+    return n - this.items.length;
+  }
+  setMetaHidden(on) {
+    this.metaHidden = !!on;
+    if (on) this.sel = this.sel.filter(mine);
+    this.redraw(); this.renderLive(); this.notifySelect();
+  }
   // Pen colours recolour pen ink and text; highlighter colours recolour highlighter strokes.
   recolorSelection(color, hl = HL_COLORS.includes(color)) {
     let targets = this.sel.filter(it => it.type !== 'image' && !!it.hl === hl);
     if (!targets.length) targets = this.sel.filter(it => it.type !== 'image');
     if (!targets.length) return false;
     this.checkpoint();
-    for (const it of targets) it.color = color;
+    for (const it of targets) { it.color = color; if (isMeta(it)) it.kept = true; }    // recoloured on purpose: keep it
     this.redraw(); this.onChange?.('recolor');
     return true;
   }
@@ -393,7 +638,7 @@ export class Notebook {
   rebuild() { this.items.forEach(it => this.prepare(it)); this.redraw(); this.notifySelect(); }
   redraw() {
     this.ctx.clearRect(0, 0, PAGE_W, PAGE_H);
-    paintItems(this.ctx, this.items);
+    paintItems(this.ctx, this.metaHidden ? this.items.filter(mine) : this.items);
   }
   renderLive() {
     const c = this.lctx;
@@ -460,7 +705,7 @@ export class Notebook {
     this.cancelActive();
     if (this.input) { this.input.ui.remove(); this.input = null; }
     this.sel = []; this.lasso = null; this.drag = null;
-    this.items = items.map(it => prepareItem({ ...normalizeItem(it) }));
+    this.items = mergeMetaStrokes(items.map(it => ({ ...normalizeItem(it) }))).map(prepareItem);
     this.history = hist.history; this.future = hist.future;
     this.lastPoint = { x: 320, y: 220 };
     this.redraw(); this.renderLive(); this.notifySelect();
@@ -568,7 +813,7 @@ export class Notebook {
   lines() {
     const rows = new Map();
     textFont();
-    for (const it of this.items) if (it.type === 'textbox' && !it.editing) {
+    for (const it of this.items) if (it.type === 'textbox' && !it.editing && mine(it)) {
       it.rows.forEach((text, i) => {
         if (!text.trim()) return;
         const base = rowBaseline(it, i), key = Math.round((base + 8 - TOP) / RULE);
@@ -581,18 +826,18 @@ export class Notebook {
       return { id: `L${i + 1}`, text: rs.map(r => r.text).join(' '), bbox: union(rs.map(r => r.bbox)).map(Math.round) };
     });
   }
-  hasStrokes() { return this.items.some(it => it.type === 'stroke'); }
+  hasStrokes() { return this.items.some(it => (it.type === 'stroke' || it.type === 'ink') && mine(it)); }
   hasImages() { return this.items.some(it => it.type === 'image'); }
   hasBackground() { return this.items.some(it => it.bg); }
   isEmpty() { return !this.items.length; }
-  signature() { return this.items.map(it => it.type === 'textbox' ? `${Math.round(it.y)}:${it.text}` : it.type === 'image' ? `i${Math.round(it.x)},${Math.round(it.y)},${Math.round(it.w)}` : it.pts.length).join('|'); }
+  signature() { return this.items.filter(mine).map(it => it.type === 'textbox' ? `${Math.round(it.y)}:${it.text}` : it.type === 'image' ? `i${Math.round(it.x)},${Math.round(it.y)},${Math.round(it.w)}` : it.type === 'ink' ? `k${it.segs.length}` : it.pts?.length ?? `m${Math.round(it.x)},${Math.round(it.y)}`).join('|'); }
   // Text boxes count row by row, so Meta can still write to the right of a short line in a wide box.
   occupied(box) { return this.items.some(it => !it.bg && (it.rowBoxes ? it.rowBoxes.some(b => overlap(b, box)) : overlap(it.bbox, box))); }
 
   // Boxes of handwritten rows, top to bottom: pen strokes grouped where they overlap vertically
   // (half the shorter stroke's height), so an integral sign and its small terms land in one row.
   inkRows() {
-    const boxes = this.items.filter(it => it.type === 'stroke' && !it.hl && it.bbox).map(it => [...it.bbox])
+    const boxes = this.items.filter(it => (it.type === 'stroke' || it.type === 'ink') && !it.hl && it.bbox && mine(it)).map(it => [...it.bbox])
       .sort((a, b) => (a[1] + a[3] / 2) - (b[1] + b[3] / 2));
     const rows = [];
     for (const b of boxes) {
@@ -608,14 +853,15 @@ export class Notebook {
   }
 
   // White page with the student's ink, typed text and pictures, cropped below the content.
-  // JPEG when there is a photo on it (much smaller), PNG otherwise.
+  // Meta's own ink (by: 'meta') is left out. JPEG when there is a photo on it (much smaller), PNG otherwise.
   snapshot() {
-    const bottom = Math.min(PAGE_H, Math.max(TOP + RULE, ...this.items.map(it => it.bbox[1] + it.bbox[3])) + 40);
+    const items = this.items.filter(mine);
+    const bottom = Math.min(PAGE_H, Math.max(TOP + RULE, ...items.map(it => it.bbox[1] + it.bbox[3])) + 40);
     const c = document.createElement('canvas');
     c.width = PAGE_W; c.height = Math.ceil(bottom);
     const g = c.getContext('2d');
     g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
-    paintItems(g, this.items);
+    paintItems(g, items);
     return this.hasImages() ? c.toDataURL('image/jpeg', 0.85) : c.toDataURL('image/png');
   }
 }

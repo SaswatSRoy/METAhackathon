@@ -107,14 +107,18 @@
     </div>
 
     <div class="right">
-      <button id="auto" class="toggle" aria-pressed="true" title="Suggest what Meta can do when I pause writing"><i></i><span>Suggestions</span></button>
-      <button id="wake" class="toggle" aria-pressed="false" title="Listen for “Hey Meta”"><i></i><span>Wake word</span></button>
+      <button id="auto" class="toggle" aria-pressed="true" aria-label="Suggestions" title="Suggest what Meta can do when I pause writing"><i></i><span>Suggestions</span><b class="short">Suggest</b></button>
+      <button id="meta-eye" class="toggle" aria-pressed="true" aria-label="Meta’s ink: shown" title="Show or hide Meta’s ink"><i></i><span>Meta’s ink</span><b class="short">Meta</b></button>
+      <button id="wake" class="toggle" aria-pressed="false" aria-label="Wake word" title="Listen for “Hey Meta”"><i></i><span>Wake word</span><b class="short">Wake</b></button>
       <div class="menu-wrap">
         <button id="more" class="icon" title="More" aria-haspopup="true" aria-expanded="false"><svg><use href="#i-more"/></svg></button>
         <div id="menu" class="menu" hidden>
           <button data-act="demo"><b>Try the demo problem</b><small>Types a worked integral with a mistake</small></button>
           <button data-act="hide-meta">Hide Meta’s ink</button>
           <button data-act="clear-meta">Clear Meta’s ink <kbd>Esc</kbd></button>
+          <div class="menu-row"><span>Meta writes in</span><div class="meta-inks" role="group" aria-label="Meta’s ink colour">
+            <button data-meta-ink="#d0452b" style="--c:#d0452b" title="Pencil red" aria-label="Pencil red" aria-pressed="true"></button><button data-meta-ink="#5b6470" style="--c:#5b6470" title="Graphite" aria-label="Graphite" aria-pressed="false"></button><button data-meta-ink="#b0337a" style="--c:#b0337a" title="Magenta" aria-label="Magenta" aria-pressed="false"></button><button data-meta-ink="mine" class="mine" title="Write in my pen colour" aria-pressed="false">My colour</button>
+          </div></div>
           <hr>
           <div class="menu-row"><span>Paper</span><div class="seg mini" id="paper-seg">
             <button data-paper="ruled" aria-pressed="true">Ruled</button><button data-paper="grid" aria-pressed="false">Grid</button><button data-paper="blank" aria-pressed="false">Blank</button>
@@ -154,6 +158,8 @@
             <div class="sel-dots hl">
               <button data-recolor="#ffd426" style="--c:#ffd426" title="Yellow highlight" aria-label="Yellow highlight"></button><button data-recolor="#7fe07a" style="--c:#7fe07a" title="Green highlight" aria-label="Green highlight"></button><button data-recolor="#ff86c3" style="--c:#ff86c3" title="Pink highlight" aria-label="Pink highlight"></button>
             </div>
+            <button data-sel="more" class="sel-act" title="Ask Meta for a more specific hint" hidden>More help</button>
+            <button data-sel="adopt" class="sel-act sel-adopt" title="Make Meta’s ink yours: your colour, and Meta reads it as your work">Make it mine</button>
             <button data-sel="delete" class="sel-del" title="Delete (⌫)"><svg><use href="#i-trash"/></svg><span>Delete</span></button>
           </div>
           <div id="reading" class="reading" hidden><i></i><span>Meta is reading your page…</span></div>
