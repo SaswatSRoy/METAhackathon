@@ -23,9 +23,35 @@ const nb = new Notebook({
   onChange: kind => { dismissCoach(); scheduleSave(); syncBg(); if (kind === 'stroke' || kind === 'text') scheduleAutoCheck(); },
   onSelect: box => showSelBar(box),
   onLongPress: it => pickMetaMark(it),
+  beforeStroke: (s, { tap, ptype }) => {
+    if (tap && meta.writing) { meta.skip(); return true; }                 // tap while Meta writes: finish now
+    const p0 = { x: s.pts[0][0], y: s.pts[0][1] };
+    const pv = !s.hl && meta.previewAt(p0);
+    if (pv && tap && ptype === 'pen') { meta.decide(pv.pid, 'accept'); return true; }   // Pencil tap on the faint ink
+    const old = tap && nb.metaAt(p0);
+    if (old?.dim) {                                                          // tap a faded hint: bring it back
+      for (const it of nb.items) if (it.grp === old.grp) delete it.dim;
+      nb.redraw(); scheduleSave(); return true;
+    }
+    return false;
+  },
+  afterStroke: s => {
+    const pv = !s.hl && meta.previewAt({ x: s.pts[0][0], y: s.pts[0][1] });
+    if (pv) meta.dismiss(pv.pid);                                            // writing over a preview dismisses it
+    if (!s.hl) fadeOldHints(s);
+  },
 });
+// Old hints fade (to 40%) once the student has written two more strokes below them; a tap brings one back.
+function fadeOldHints(s) {
+  const top = s.bbox[1];
+  for (const it of nb.items) {
+    if (it.by !== 'meta' || it.mk !== 'note' || it.kept || it.dim || top < it.bbox[1] + it.bbox[3]) continue;
+    it.below = (it.below || 0) + 1;
+    if (it.below >= 2) it.dim = true;
+  }
+}
 // Meta's ink colour: one of a few pencils, or 'mine' (the student's pen colour at the time Meta writes).
-const META_INKS = { '#d0452b': 'Pencil red', '#5b6470': 'Graphite', '#6a4bc4': 'Violet', mine: 'My pen colour' };
+const META_INKS = { '#d0452b': 'Pencil red', '#5b6470': 'Graphite', '#b0337a': 'Magenta', mine: 'My pen colour' };
 let metaInk = META_COLOR;
 try { const v = localStorage.getItem('margin.metaInk'); if (v in META_INKS) metaInk = v; } catch { /* private mode */ }
 const metaColor = () => metaInk === 'mine' ? nb.color : metaInk;
@@ -90,6 +116,8 @@ async function openNotebook(id, pageId) {
   if (!pages.length) { const p = newPage(book.id); await store.putPage(p); pages.push(p); }
   book.pages = pages.map(p => p.id);
   Object.assign(state, { book, pages });
+  if (book.metaInk in META_INKS) metaInk = book.metaInk;              // Meta's colour follows the notebook
+  showMetaInk();
   $('#nb-title').textContent = book.title;
   $('#paper-title').textContent = book.title;
   document.title = `${book.title} · Margin`;
@@ -386,6 +414,7 @@ function setMetaHidden(hidden) {
   if (nb.metaHidden !== hidden) nb.setMetaHidden(hidden);
   $('[data-act="hide-meta"]').textContent = hidden ? 'Show Meta’s ink' : 'Hide Meta’s ink';
   $('#meta-eye').setAttribute('aria-pressed', !hidden);
+  $('#meta-eye').setAttribute('aria-label', hidden ? 'Meta’s ink: hidden' : 'Meta’s ink: shown');
 }
 $('#meta-eye').onclick = () => setMetaHidden(!nb.metaHidden);
 
@@ -399,6 +428,7 @@ $$('[data-meta-ink]').forEach(b => b.onclick = e => {
   const prev = metaColor();
   metaInk = b.dataset.metaInk;
   try { localStorage.setItem('margin.metaInk', metaInk); } catch { /* private mode */ }
+  if (state.book) { state.book.metaInk = metaInk; store.putNotebook(state.book).catch(() => {}); }
   const n = meta.recolor(prev, metaColor());
   showMetaInk();
   if (n) scheduleSave();
@@ -443,8 +473,14 @@ function nextHintLevel(lines, sig, escalate) {
   return same || escalate ? Math.min(3, hintMemo.level + 1) : 1;
 }
 
+let queued = null;
 async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null } = {}) {
-  if (busy || !current()) return;
+  if (!current()) return;
+  if (busy) {                                        // Meta is busy: do it next instead of dropping it
+    queued = [command, mode, { escalate, hintLevel }];
+    toast(`Meta is still writing. It’ll do “${command.length > 40 ? command.slice(0, 39) + '…' : command}” next.`);
+    return;
+  }
   nb.commitInput();
   dismissCoach();
   const lines = nb.lines();
@@ -467,8 +503,8 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
   showReading(true);
   try {
     const resp = await assist(payload);
-    showReading(false);
     if (current()?.id !== pageId) return;           // the student turned the page meanwhile
+    showReading('writing');
     showTrace(resp.agent_trace);
     const wrong = resp.first_wrong && ((resp.lines || []).find(l => l.id === resp.first_wrong) || lines.find(l => l.id === resp.first_wrong));
     hintMemo = resp.mode === 'hint' && wrong ? { sig, text: wrong.text, level: payload.hint_level } : null;
@@ -487,6 +523,7 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
   } finally {
     busy = false;
     showReading(false);
+    if (queued) { const q = queued; queued = null; setTimeout(() => callMeta(...q), 60); }
   }
 }
 
@@ -522,10 +559,15 @@ function showTrace(trace) {
   traceTimer = setTimeout(() => { el.classList.remove('show'); traceTimer = setTimeout(() => { el.hidden = true; }, 600); }, 4000);
 }
 
+// on: true while Meta reads the page, 'writing' while it writes (tap the page to skip), false when done.
 function showReading(on) {
   const r = $('#reading');
-  $('#mic').classList.toggle('thinking', on);
+  $('#mic').classList.toggle('thinking', !!on);
+  r.querySelector('span').textContent = on === 'writing' ? 'Meta is writing… tap to skip' : 'Meta is reading your page…';
+  if (!voice.on) micLabel.textContent = on === 'writing' ? 'Meta is writing…' : on ? 'Meta is reading…' : idleLabel();
   if (!on) { r.hidden = true; return; }
+  if (on === 'writing') { r.classList.add('writing'); return; }     // stays where it was, by the pen
+  r.classList.remove('writing');
   const { x, y } = nb.lastPoint;
   r.style.left = `${clamp(x + 24, 110, PAGE_W - 270)}px`;
   r.style.top = `${clamp(y - 58, 70, PAGE_H - 60)}px`;
@@ -547,7 +589,7 @@ autoBtn.onclick = () => {
 const lastHint = () => meta.marks.some(m => m.kind === 'note' && m.note);
 const suggest = new Suggest(page, {
   nb, enabled: suggestOn, hinted: lastHint,
-  canShow: () => !busy && !!state.book && cmd.hidden,
+  canShow: () => !busy && !queued && !!state.book && cmd.hidden,
   onPick: c => callMeta(c.say, c.mode),
 });
 function scheduleAutoCheck() { suggest.poke(); }

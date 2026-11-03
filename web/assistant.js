@@ -189,6 +189,7 @@ export class MetaInk {
     for (const it of this.nb.items) if (isMeta(it)) { const k = it.grp || it; if (!by.has(k)) by.set(k, []); by.get(k).push(it); }
     return [...by.values()].map(items => ({
       kind: items[0].mk || 'note', items, baked: true, pts: [],
+      strokes: items.reduce((n, it) => n + (it.segs?.length ?? (it.type === 'stroke' ? 1 : 0)), 0),
       boxes: items.map(it => it.bbox), box: unionBox(items.map(it => it.bbox)),
       note: items.find(it => it.note)?.note || null, text: items.find(it => it.say)?.say || '', kept: items.some(it => it.kept),
     }));
@@ -302,9 +303,10 @@ export class MetaInk {
   }
 
   // ---- baking: a finished mark becomes notebook items -------------------------------------
-  // Plain pen strokes (words, maths, ticks, circles, arrows, plain graphs) become one stroke item per
-  // pen stroke, from the engine's point lists. Anything else (shaded or dashed graphs, the font
-  // fallback) becomes one 'mark' item holding its markup. Not undoable by itself: callers checkpoint.
+  // A mark of plain pen strokes (words, maths, ticks, circles, arrows, plain graphs) becomes ONE 'ink'
+  // item holding every pen stroke as a seg, from the engine's point lists (the eraser still takes them
+  // one by one). Anything else (shaded or dashed graphs, the font fallback) becomes one 'mark' item
+  // holding its markup. Not undoable by itself: callers checkpoint.
   bake(m, extra = {}) {
     const color = this.color(), grp = `g${Date.now().toString(36)}${++this.n}`;
     const paths = [...m.g.querySelectorAll('path.ink-stroke')];
@@ -312,13 +314,11 @@ export class MetaInk {
     const base = { by: 'meta', mk: m.kind, grp, ...extra };
     let items;
     if (plain) {
-      items = paths.flatMap(p => {
-        const op = p.getAttribute('opacity'), size = +p.getAttribute('stroke-width') || 2.4;
-        return p._polys.filter(poly => poly.length).map(poly => ({
-          type: 'stroke', ...base, color, size, sim: false, mono: true, ...(op != null ? { op: +op } : {}),
-          pts: (poly.length === 1 ? [poly[0], [poly[0][0] + 0.4, poly[0][1] + 0.3]] : poly).map(([x, y]) => [x, y, 0.5]),
-        }));
+      const segs = paths.flatMap(p => {
+        const op = p.getAttribute('opacity'), w = +p.getAttribute('stroke-width') || 2.4;
+        return p._polys.filter(poly => poly.length).map(poly => ({ p: poly.map(([x, y]) => [x, y]), w, ...(op != null ? { o: +op } : {}) }));
       });
+      items = segs.length ? [{ type: 'ink', ...base, color, segs }] : [];
     } else {
       const html = cleanMarkup(m.g);
       const bs = [...m.boxes, ...(m.pts.length > 1 ? [ptsBox(m.pts)] : [])];
@@ -326,7 +326,7 @@ export class MetaInk {
       const polys = paths.flatMap(p => p._polys || []).map(poly => poly.map(([x, y]) => [r1(x), r1(y)]));
       items = [{ type: 'mark', ...base, html, box0: unionBox(bs), x: 0, y: 0, color, polys: polys.length ? polys : polysFromHtml(html) }];
     }
-    if (!items.length) return [];
+    if (!items.length) { m.g.remove(); this.live = this.live.filter(x => x !== m); return []; }
     const say = markText(m.g);
     if (say) items[0].say = say;
     if (m.note) items[0].note = m.note;
@@ -364,9 +364,11 @@ export class MetaInk {
     m.g.classList.toggle('tap-target', !!on);
     m.g.querySelector(':scope > rect.hit')?.remove();
     if (!m.tap) {
-      m.tap = e => { if (!m.pending) return; e.stopPropagation(); this.decide(m.pid, 'accept'); };
+      // A finger or mouse tap on the faint ink accepts it. The Pencil writes through it: a stroke that
+      // starts here dismisses the preview and is kept, a Pencil tap accepts (see app.js beforeStroke).
+      m.tap = e => { if (!m.pending || e.pointerType === 'pen') return; e.stopPropagation(); this.decide(m.pid, 'accept'); };
       m.g.addEventListener('click', m.tap);
-      m.g.addEventListener('pointerdown', e => { if (m.pending) e.stopPropagation(); });
+      m.g.addEventListener('pointerdown', e => { if (m.pending && e.pointerType !== 'pen') e.stopPropagation(); });
     }
   }
   pending() { return this.live.filter(m => m.pending); }
@@ -418,17 +420,33 @@ export class MetaInk {
     this.syncPills();
     this.onCommit?.(act);
   }
+  // The preview under a page point (its marks' boxes, a little padded).
+  previewAt({ x, y }) { return this.pending().find(m => m.pid !== this.redoing && m.boxes.some(b => inBox(b, x, y, 6))) || null; }
+  // Dismiss a preview without an undo step of its own (the stroke written over it already took one).
+  dismiss(pid) {
+    const ms = this.live.filter(m => m.pending && m.pid === pid);
+    if (!ms.length) return false;
+    this.fadeOut(ms);
+    this.live = this.live.filter(m => !ms.includes(m));
+    this.syncPills();
+    this.onCommit?.('discard');
+    return true;
+  }
+  // Tap while Meta writes: finish everything still being written at once.
+  skip() { if (this.writing) this.fast = true; }
+
   // Enter with a preview showing: accept the newest one.
   acceptLatest() { const m = this.pending().at(-1); if (!m) return false; this.decide(m.pid, 'accept'); return true; }
 
   // ---- primitives --------------------------------------------------------------
   tween(ms, fn, token) {
+    if (this.fast) { fn(1); return Promise.resolve(); }
     return new Promise(res => {
       const t0 = performance.now();
       const step = now => {
         const t = clamp((now - t0) / ms, 0, 1);            // rAF time can be a little before t0
         fn(t);
-        if (t < 1 && token === this.run) requestAnimationFrame(step); else { fn(1); res(); }
+        if (t < 1 && token === this.run && !this.fast) requestAnimationFrame(step); else { fn(1); res(); }
       };
       requestAnimationFrame(step);
     });
@@ -458,7 +476,7 @@ export class MetaInk {
     const rect = [x - 4, base - box.h * em - 3, box.w * em + 8, (box.h + box.d) * em + 6];
     m.boxes.push(rect);
     if (reveal) this.onReveal?.(rect);
-    if (instant || !els.length || token !== this.run) return rect;
+    if (instant || this.fast || !els.length || token !== this.run) return rect;
     const { times, end } = penTimes(box.paths.map(p => p.map((v, i) => (i % 2 ? base : x) + v * em)), { speed });
     const total = Math.min(end, maxMs), k = end / total;
     const lens = els.map(e => e.getTotalLength() + 0.5), done = els.map(() => -1);
@@ -551,6 +569,8 @@ export class MetaInk {
     if (extrasOnly) this.clearKinds(kinds);
     else this.clearKinds(new Set(this.marks.map(m => m.kind).filter(k => !EXTRAS.has(k))));
     this.nb.redraw(); this.syncColor();
+    this.writing = true;
+    this.fast = matchMedia('(prefers-reduced-motion: reduce)').matches;     // reduced motion: ink appears at once
     const token = this.run;
     this.byId = new Map(sentLines.map(l => [l.id, l]));
     for (const l of resp.lines || []) this.byId.set(l.id, { ...this.byId.get(l.id), ...l, bbox: l.bbox?.length === 4 ? l.bbox : this.byId.get(l.id)?.bbox });
@@ -570,14 +590,14 @@ export class MetaInk {
     const todo = anns.filter(a => a.kind in order).sort((a, b) => order[a.kind] - order[b.kind]);
     if (!todo.length && resp.verdict) todo.push({ kind: 'note', target: null, text: resp.verdict });
     for (const a of todo) {
-      if (token !== this.run) return;
+      if (token !== this.run) { this.writing = false; this.fast = false; return; }
       const before = new Set(this.live);
       try { await this[`a_${a.kind}`](a, token); } catch (err) { console.warn('[margin] skipped annotation', a, err); }
       // Meta lifted the pen: what it just wrote becomes notebook ink (previews wait for Accept).
       if (token === this.run) for (const m of this.live.filter(m => !before.has(m) && !m.pending && m.kind !== 'read')) this.bake(m);
-      await sleep(a.kind === 'tick' ? 40 : 140);
+      if (!this.fast) await sleep(a.kind === 'tick' ? 40 : 140);
     }
-    if (token === this.run) this.syncPills();
+    if (token === this.run) { this.syncPills(); this.writing = false; this.fast = false; }
     return todo.length;
   }
 

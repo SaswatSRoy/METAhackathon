@@ -33,6 +33,7 @@ from server.db import (
     db,
     decompress_bytes,
     quantize_items,
+    MAX_ITEMS_PER_PAGE,
 )
 
 
@@ -528,6 +529,22 @@ def test_quantize_keeps_meta_ink_tags_and_graph_marks():
     assert "by" not in s and "mono" not in s
     assert g["type"] == "mark" and g["by"] == "meta" and g["box0"] == [700.0, 300.0, 260.0, 180.0]
     assert (g["x"], g["y"]) == (12.0, -4.0) and g["polys"] == [[[0.0, 0.0], [5.0, 5.0]]]
+
+
+def test_meta_ink_marks_are_one_item_each_and_fit_the_page_cap():
+    """Each of Meta's marks is ONE 'ink' item holding its pen strokes, so 1800 Meta strokes
+    (e.g. 30 hints of 60 strokes) plus 700 student strokes stay far under MAX_ITEMS_PER_PAGE."""
+    seg = lambda i: {"p": [[i, 10.0], [i + 4.0, 14.0], [i + 8.0, 9.0]], "w": 1.9}
+    hints = [{"type": "ink", "by": "meta", "mk": "note", "grp": f"g{h}", "color": "#d0452b", "kept": True, "dim": True,
+              "segs": [seg(float(k)) | ({"o": 0.75} if k == 0 else {}) for k in range(60)]} for h in range(30)]
+    student = [{"type": "stroke", "color": "#1f3a7a", "size": 1.8, "sim": True, "pts": [[1, 1, 0.5], [2, 2, 0.5]]}] * 700
+    opt, count = quantize_items(hints + student)
+    assert len(opt) == 730 < MAX_ITEMS_PER_PAGE
+    assert count == 1800 + 700
+    first = opt[0]
+    assert first["type"] == "ink" and first["by"] == "meta" and first["kept"] is True and first["dim"] is True
+    assert len(first["segs"]) == 60 and first["segs"][0] == {"p": [[0.0, 10.0], [4.0, 14.0], [8.0, 9.0]], "w": 1.9, "o": 0.75}
+    assert "o" not in first["segs"][1]
 
 
 def test_postgresql_dialect_pool_and_rls_context(monkeypatch):

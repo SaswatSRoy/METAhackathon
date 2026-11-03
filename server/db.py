@@ -234,7 +234,8 @@ def _decimate_points(pts: list[Any], max_pts: int = MAX_POINTS_PER_STROKE) -> li
 
 
 # Meta's ink is stored as ordinary items tagged by="meta" (see web/ink.js): keep those tags.
-_META_TAGS = ("by", "mk", "grp", "say", "kept")
+_META_TAGS = ("by", "mk", "grp", "say", "kept", "dim")
+MAX_SEGS_PER_INK = 2000
 MAX_MARK_HTML = 200_000
 
 
@@ -301,6 +302,24 @@ def quantize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], i
                 "color": str(it.get("color", "#1f3a7a"))[:32],
             })
             _keep_meta_tags(it, optimized[-1])
+        elif kind == "ink":
+            # One of Meta's marks: all its pen strokes ("segs") in one item, so a page holds
+            # hundreds of hints without nearing MAX_ITEMS_PER_PAGE.
+            segs_out: list[dict[str, Any]] = []
+            for sg in (it.get("segs") or [])[:MAX_SEGS_PER_INK]:
+                if not isinstance(sg, dict):
+                    continue
+                pts = [pt[:2] for pt in _decimate_points(sg.get("p") or [], 600)]
+                if not pts:
+                    continue
+                seg: dict[str, Any] = {"p": pts, "w": round(float(sg.get("w", 2.0)), 2)}
+                if isinstance(sg.get("o"), (int, float)):
+                    seg["o"] = round(float(sg["o"]), 2)
+                segs_out.append(seg)
+            if not segs_out:
+                continue
+            stroke_count += len(segs_out)
+            optimized.append(_keep_meta_tags(it, {"type": "ink", "color": str(it.get("color", "#d0452b"))[:32], "segs": segs_out}))
         elif kind == "mark":
             # One of Meta's marks kept as SVG markup (graphs): moved by (x, y), hit-tested by polys.
             html = str(it.get("html", ""))

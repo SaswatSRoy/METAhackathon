@@ -366,7 +366,7 @@ body.on-shelf .mic, body.on-shelf .coach, body.on-shelf .cmd { display: none; }
 .sel-bar {
   position: absolute; z-index: 4; transform-origin: 0 0; display: flex; align-items: center; gap: 4px; padding: 5px 6px; white-space: nowrap;
   border-radius: 13px; background: rgba(255,255,255,.97); border: 1px solid var(--hair); box-shadow: 0 10px 26px -10px rgba(40,30,10,.4);
-  font: 500 13px Inter, system-ui, sans-serif; color: var(--ui); animation: pop .15s ease-out;
+  font: 500 13px Inter, system-ui, sans-serif; color: var(--ui); animation: fadein .15s ease-out;   /* not pop: its transform would drop the bar's own placement for a moment, over the selection */
 }
 .sel-dots { display: flex; gap: 5px; padding: 0 6px; }
 .sel-dots + .sel-dots, .sel-del { border-left: 1px solid var(--hair); }
@@ -452,3 +452,19 @@ body.on-shelf .trace { display: none; }
   .sel-dots button { width: 30px; height: 30px; }
 }
 #meta-eye[aria-pressed="true"] i { background: var(--meta); box-shadow: 0 0 0 3px var(--meta-soft); }
+
+/* Round 2: iPad labels and touch targets */
+.toggle .short { display: none; font-weight: 500; }
+@media (max-width: 1240px) { #meta-eye .short { display: inline; } }
+.reading.writing { animation: none; }
+@media (pointer: coarse) {
+  .toggle, .sel-dots button, .meta-inks button { position: relative; }
+  .toggle::after { content: ""; position: absolute; inset: -6px -2px; }          /* 44px tall hit area */
+  .sel-dots { gap: 10px; }
+  .sel-dots button, .meta-inks button { flex: none; }
+  .sel-dots button { width: 36px; height: 36px; }
+  .sel-dots button::after, .meta-inks button::after { content: ""; position: absolute; inset: -6px; border-radius: 50%; }
+  .meta-inks { gap: 10px; }
+  .menu .meta-inks button { width: 36px; height: 36px; }
+  .menu .meta-inks button.mine { width: auto; height: 34px; border-radius: 17px; padding: 0 12px; }
+}

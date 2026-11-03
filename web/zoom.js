@@ -71,6 +71,7 @@ export class Zoom {
     if (e.pointerType !== 'touch') return;
     this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (this.touches.size === 2) {
+      clearTimeout(this.mode?.lp);
       this.nb.cancelActive();
       const [a, b] = [...this.touches.values()];
       const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
@@ -82,7 +83,10 @@ export class Zoom {
     const onPage = this.page.contains(e.target);
     if (e.target.closest('.tbox-ui, .tap-target, .sel-bar')) return;
     if (onPage && !this.nb.penSeen) return;              // finger writes, like a stylus
-    this.mode = { kind: 'pan', id: e.pointerId, x: e.clientX, y: e.clientY };
+    const m = this.mode = { kind: 'pan', id: e.pointerId, x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY };
+    // A finger resting on Meta's ink (once fingers pan) opens its menu, like a long-press.
+    const it = onPage && this.nb.metaAt?.(this.pagePoint({ x: e.clientX, y: e.clientY }));
+    if (it) m.lp = setTimeout(() => { if (this.mode === m) { this.mode = null; this.nb.onLongPress?.(it); } }, 520);
     e.stopPropagation();
   }
 
@@ -97,6 +101,7 @@ export class Zoom {
       this.setZoom(m.zoom * Math.hypot(a.x - b.x, a.y - b.y) / m.dist, mid, m.p, { resolution: false });
       e.stopPropagation();
     } else if (m?.kind === 'pan' && m.id === e.pointerId) {
+      if (m.lp && Math.hypot(e.clientX - m.x0, e.clientY - m.y0) > 8) { clearTimeout(m.lp); m.lp = null; }
       this.desk.scrollLeft -= e.clientX - m.x; this.desk.scrollTop -= e.clientY - m.y;
       m.x = e.clientX; m.y = e.clientY;
       e.stopPropagation();
@@ -114,6 +119,7 @@ export class Zoom {
       } else if (!this.touches.size) this.mode = null;
       this.settleSoon();
     } else if (m?.kind === 'pan' && m.id === e.pointerId) {
+      clearTimeout(m.lp);
       this.mode = null;
       e.stopPropagation();
     }
