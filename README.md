@@ -41,6 +41,10 @@ pen strokes / typed lines ──► Muse Spark 1.3 reads the page into math line
 
 - Meta models: **Muse Spark 1.3** (page reading, intent, hint wording), **Muse Voice Transcribe**
   (voice commands when browser Web Speech is missing or fails).
+- Live voice over WebSockets: the page streams the mic to `/ws/voice`, which relays it to Meta's realtime
+  transcription (`wss://api.meta.ai/v1/asr/realtime`, key kept on the server) and sends the words back as
+  you speak. Works where the server keeps sockets open (`start.sh`, Docker, Hugging Face Spaces, Render).
+  Vercel functions can't, so there the page records a clip and sends it to `/api/transcribe` instead.
 - API contract between page and server: [docs/CONTRACT.md](docs/CONTRACT.md).
 - Optional decision router (Muse Glimmer, off by default): one short JSON call picks the tool and
   hint level, with Spark as the fallback. Data builder, eval and fine-tuning: [docs/ROUTER.md](docs/ROUTER.md).

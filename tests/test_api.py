@@ -19,7 +19,7 @@ def kinds(body):
 def test_health_offline():
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "offline": True, "model": "muse-spark-1.3"}
+    assert r.json() == {"ok": True, "offline": True, "model": "muse-spark-1.3", "realtime": False}
 
 
 def test_hint_on_sign_error():

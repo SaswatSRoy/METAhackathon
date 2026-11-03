@@ -715,7 +715,7 @@ const voice = new Voice({
     mic.setAttribute('aria-pressed', s === 'on');
     micClock(s === 'on');
     if (s !== 'on') micLabel.textContent = s === 'transcribing' ? 'Transcribing…' : idleLabel();
-    vState.textContent = s === 'on' ? (voice.engine === 'browser' ? '● Mic on: words appear as you speak · tap Mic to stop' : '● Mic on: Meta writes the words when you stop')
+    vState.textContent = s === 'on' ? ((voice.engine === 'browser' || /live/.test(detail)) ? '● Mic on: words appear as you speak · tap Mic to stop' : '● Mic on: Meta writes the words when you stop')
       : s === 'transcribing' ? 'Meta is transcribing…' : `Mic off · ${voice.engineName}`;
     vState.classList.toggle('live', s === 'on');
     showEngine();
@@ -767,7 +767,7 @@ async function demo() {
 fetch('/api/health').then(r => r.json()).then(h => {
   $('#status').textContent = h.offline ? 'Meta: offline mode (reads typed lines only)' : `Meta: online · ${h.model || ''}`;
   $('#status').dataset.ok = !h.offline;
-  voice.serverOk = !h.offline;
+  voice.serverOk = !h.offline; voice.realtime = !!h.realtime && !!window.WebSocket;
 }).catch(() => { $('#status').textContent = 'Meta: server not reachable'; });
 
 // ---- offline app shell ---------------------------------------------------------------------------
