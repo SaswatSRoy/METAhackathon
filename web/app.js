@@ -1,7 +1,7 @@
 // Margin: wires the shelf, the notebook page, pages, Meta's ink, voice and the command pill together.
-import { Notebook, PAGE_W, PAGE_H, PEN_SIZES, rowY, RULE } from './ink.js';
+import { Notebook, PAGE_W, PAGE_H, PEN_SIZES, rowY, RULE, isMeta } from './ink.js';
 import { saveImage, savePdfPages, isPdf } from './images.js';
-import { MetaInk, assist } from './assistant.js';
+import { MetaInk, assist, META_COLOR } from './assistant.js';
 import { Suggest } from './suggest.js';
 import { Voice } from './voice.js';
 import { store, authClient, newPage, createNotebook } from './store.js';
@@ -22,10 +22,16 @@ const nb = new Notebook({
   onErase: (pt, R) => meta.erase(pt, R),
   onChange: kind => { dismissCoach(); scheduleSave(); syncBg(); if (kind === 'stroke' || kind === 'text') scheduleAutoCheck(); },
   onSelect: box => showSelBar(box),
+  onLongPress: it => pickMetaMark(it),
 });
+// Meta's ink colour: one of a few pencils, or 'mine' (the student's pen colour at the time Meta writes).
+const META_INKS = { '#d0452b': 'Pencil red', '#5b6470': 'Graphite', '#6a4bc4': 'Violet', mine: 'My pen colour' };
+let metaInk = META_COLOR;
+try { const v = localStorage.getItem('margin.metaInk'); if (v in META_INKS) metaInk = v; } catch { /* private mode */ }
+const metaColor = () => metaInk === 'mine' ? nb.color : metaInk;
 const meta = new MetaInk($('#meta'), nb, {
   onReveal: reveal,
-  onNoteTap: () => callMeta('more please, be more specific', 'hint', { escalate: true }),
+  inkColor: metaColor,
   onRedo: ask => ask ? callMeta(ask.command, ask.mode, { hintLevel: ask.hint_level }) : callMeta('just give me the answer', 'answer'),
   onCommit: () => scheduleSave(),
 });
@@ -102,13 +108,13 @@ async function showPage(i, { force = false } = {}) {
   suggest.cancel();
   state.idx = i;
   const p = current();
-  meta.restore(p.meta);
-  nb.load(p.items, histFor(p.id));
+  const { live, items } = meta.split(p.meta);        // older pages: finished marks become notebook items
+  meta.restore(live);
+  nb.load([...(p.items || []), ...items], histFor(p.id));
   hintMemo = null;
   setPaper(p.paper, false);
   syncBg();
-  page.classList.remove('meta-hidden');
-  $('[data-act="hide-meta"]').textContent = 'Hide Meta’s ink';
+  setMetaHidden(false);
   $('#page-num').textContent = `${i + 1} / ${state.pages.length}`;
   $('#prev-page').disabled = i === 0;
   $('#next-page').disabled = i === state.pages.length - 1;
@@ -234,6 +240,7 @@ $$('[data-tool]').forEach(b => b.onclick = () => setTool(b.dataset.tool));
 $$('.swatches.pen [data-color]').forEach(b => b.onclick = () => {
   if (nb.tool === 'lasso' && nb.sel.length) { nb.recolorSelection(b.dataset.color, false); return; }
   nb.setColor(b.dataset.color);
+  if (metaInk === 'mine') meta.syncColor();
   $$('.swatches.pen [data-color]').forEach(x => x.setAttribute('aria-pressed', x === b));
   if (nb.tool === 'eraser' || nb.tool === 'lasso' || nb.tool === 'highlighter') setTool('pen');
 });
@@ -251,15 +258,21 @@ selBar.onclick = e => {
   if (!b) return;
   if (b.dataset.recolor) nb.recolorSelection(b.dataset.recolor, b.closest('.hl') != null);
   if (b.dataset.sel === 'delete') nb.deleteSelection();
+  if (b.dataset.sel === 'adopt' && nb.adoptSelection()) toast('It’s yours now: Meta will read it as your work.', { label: 'Undo', fn: () => nb.undo() });
+  if (b.dataset.sel === 'more') { nb.clearSelection(); callMeta('more please, be more specific', 'hint', { escalate: true }); }
 };
 function showSelBar(box) {
   const selBar = $('#sel-bar');                     // looked up here: zoom calls this while the app is starting
   if (!box) { selBar.hidden = true; return; }
+  const metaSel = nb.sel.filter(isMeta);
+  selBar.classList.toggle('has-meta', metaSel.length > 0);
+  selBar.querySelector('[data-sel="more"]').hidden = !metaSel.some(it => it.mk === 'note');
+  selBar.querySelector('[data-sel="delete"] span').textContent = metaSel.length && metaSel.length === nb.sel.length ? 'Remove' : 'Delete';
   const k = 1 / Math.max(0.3, nb.scale);
   selBar.hidden = false;
   const above = box[1] > 64 * k;
   Object.assign(selBar.style, {
-    left: `${clamp(box[0], 4, PAGE_W - 330 * k)}px`, top: `${above ? box[1] - 8 : box[1] + box[3] + 8}px`,
+    left: `${clamp(box[0], 4, PAGE_W - (selBar.offsetWidth || 330) * k - 4)}px`, top: `${above ? box[1] - 8 : box[1] + box[3] + 8}px`,
     transform: `scale(${k})${above ? ' translateY(-100%)' : ''}`,
   });
 }
@@ -360,15 +373,48 @@ menu.onclick = e => {
   setMenu(false);
   if (act === 'demo') demo();
   if (act === 'clear-meta') clearMeta();
-  if (act === 'hide-meta') {
-    const hidden = page.classList.toggle('meta-hidden');
-    e.target.closest('button').textContent = hidden ? 'Show Meta’s ink' : 'Hide Meta’s ink';
-  }
+  if (act === 'hide-meta') setMetaHidden(!nb.metaHidden);
   if (act === 'account') openAccountModal();
   if (act === 'export-png') exportCurrentPNG();
   if (act === 'export-pdf') exportNotebookPDF();
 };
 function clearMeta() { if (meta.clear(true)) { scheduleSave(); toast('Cleared Meta’s ink.', { label: 'Undo', fn: () => nb.undo() }); } }
+
+// Hide / show Meta's ink (menu and the toolbar eye): previews, labels and Meta's items on the canvas.
+function setMetaHidden(hidden) {
+  page.classList.toggle('meta-hidden', hidden);
+  if (nb.metaHidden !== hidden) nb.setMetaHidden(hidden);
+  $('[data-act="hide-meta"]').textContent = hidden ? 'Show Meta’s ink' : 'Hide Meta’s ink';
+  $('#meta-eye').setAttribute('aria-pressed', !hidden);
+}
+$('#meta-eye').onclick = () => setMetaHidden(!nb.metaHidden);
+
+// Meta's ink colour (menu). Changing it recolours Meta's ink on this page in one undoable step.
+function showMetaInk() {
+  $$('[data-meta-ink]').forEach(b => b.setAttribute('aria-pressed', b.dataset.metaInk === metaInk));
+  meta.syncColor();
+}
+$$('[data-meta-ink]').forEach(b => b.onclick = e => {
+  e.stopPropagation();
+  const prev = metaColor();
+  metaInk = b.dataset.metaInk;
+  try { localStorage.setItem('margin.metaInk', metaInk); } catch { /* private mode */ }
+  const n = meta.recolor(prev, metaColor());
+  showMetaInk();
+  if (n) scheduleSave();
+  toast(`Meta now writes in ${META_INKS[metaInk].toLowerCase()}.`, n ? { label: 'Undo', fn: () => nb.undo() } : undefined);
+});
+
+// Long-press (or right-click) on Meta's ink: pick up that whole mark with the lasso, so the bar
+// offers Remove, Make it mine, a recolour and (for a hint) More help.
+function pickMetaMark(it) {
+  setTool('lasso');
+  nb.setSelection(nb.items.filter(x => isMeta(x) && (x === it || (it.grp && x.grp === it.grp))));
+}
+page.addEventListener('contextmenu', e => {
+  const it = nb.metaAt(zoom.pagePoint({ x: e.clientX, y: e.clientY }));
+  if (it) { e.preventDefault(); pickMetaMark(it); }
+});
 
 async function exportCurrentPNG() {
   nb.commitInput();
@@ -427,13 +473,13 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
     const wrong = resp.first_wrong && ((resp.lines || []).find(l => l.id === resp.first_wrong) || lines.find(l => l.id === resp.first_wrong));
     hintMemo = resp.mode === 'hint' && wrong ? { sig, text: wrong.text, level: payload.hint_level } : null;
     nb.checkpoint();                                 // undo removes Meta's new ink
-    page.classList.remove('meta-hidden');
+    setMetaHidden(false);
     await meta.render(resp, lines, { command, mode, hint_level: payload.hint_level });
     if (current()?.id === pageId) {
       saveNow();
       // After a hint: offer "Why?" and the next step right by it.
       const note = resp.mode === 'hint' && meta.marks.find(m => m.kind === 'note');
-      if (note && suggestOn()) { const b = note.boxes.at(-1); suggest.show(['why', 'next'], { x: b[0] + b[2] - 10, y: b[1] + b[3] + 22 }); }
+      if (note && suggestOn()) { const b = note.box || note.boxes.at(-1); suggest.show(['why', 'more', 'next'], { x: b[0] + b[2] - 10, y: b[1] + b[3] + 22 }); }
     }
   } catch (err) {
     console.warn('[margin] assist failed:', err);
@@ -551,6 +597,7 @@ addEventListener('keydown', e => {
   if (mod && k === '0') { e.preventDefault(); zoom.reset(); return; }
   if (typing || mod || e.altKey) return;
   if (k === 'enter' && !cmd.hidden) { e.preventDefault(); sendCmd(); return; }
+  if (k === 'enter' && meta.acceptLatest()) { e.preventDefault(); return; }     // Enter accepts Meta's preview
   if (k === '/' && voice.on) { e.preventDefault(); voice.stop(); return; }
   if (k === '/') { e.preventDefault(); openCmd(); }
   else if (k === 'p') setTool('pen');
@@ -596,6 +643,7 @@ function showWake(on) {
   micLabel.textContent = idleLabel();
 }
 mic.onclick = () => voice.toggle();
+showMetaInk();
 showEngine(); micLabel.textContent = idleLabel(); vState.textContent = `Mic off · ${voice.engineName}`;
 wakeBtn.onclick = () => showWake(voice.setWake(!voice.wake));
 

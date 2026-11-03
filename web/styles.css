@@ -429,3 +429,26 @@ body.on-shelf .trace { display: none; }
 .suggest button:first-child { border-color: rgba(208,69,43,.3); color: #a8341d; }
 .suggest button:hover { background: #fff; }
 .page.meta-hidden .suggest { display: none; }
+
+/* Meta's ink as notebook ink: colour picker, lasso bar actions, tap-to-accept previews, iPad targets */
+.meta-inks { display: flex; align-items: center; gap: 6px; }
+.meta-inks button { width: 20px; height: 20px; border-radius: 50%; background: var(--c); padding: 0; box-shadow: inset 0 0 0 1.5px rgba(0,0,0,.08); }
+.menu .meta-inks button { display: block; width: 20px; }
+.meta-inks button[aria-pressed="true"] { box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px var(--c, #1f3a7a); }
+.menu .meta-inks button.mine { width: auto; height: 22px; padding: 0 8px; border-radius: 11px; background: #f4f1ea; font-size: 11.5px; color: var(--ui); }
+.meta-inks button.mine[aria-pressed="true"] { box-shadow: 0 0 0 1.5px var(--ui); }
+.sel-act { height: 30px; padding: 0 10px; border-left: 1px solid var(--hair); color: var(--ui); font: inherit; white-space: nowrap; }
+.sel-act:hover { background: rgba(0,0,0,.04); }
+.sel-adopt { display: none; color: #a8341d; }
+.sel-bar.has-meta .sel-adopt { display: block; }
+.meta-layer .pending.tap-target { cursor: pointer; }
+.meta-layer .pending.tap-target:hover .hit { fill: var(--meta-soft); }
+.page[data-tool="lasso"] .tap-target { pointer-events: none; }
+@media (pointer: coarse) {
+  .meta-pills { gap: 8px; }
+  .meta-pills button, .suggest button { height: 44px; min-width: 44px; padding: 0 16px; border-radius: 22px; font-size: 14px; }
+  .suggest { gap: 8px; }
+  .sel-act, .sel-del { height: 44px; }
+  .sel-dots button { width: 30px; height: 30px; }
+}
+#meta-eye[aria-pressed="true"] i { background: var(--meta); box-shadow: 0 0 0 3px var(--meta-soft); }

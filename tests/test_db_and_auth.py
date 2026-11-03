@@ -509,6 +509,27 @@ def test_inline_data_url_rejected_in_page_items_and_stroke_decimation():
     assert opt[0]["pts"][-1] == [3499.0, 6998.0, 0.5]
 
 
+def test_quantize_keeps_meta_ink_tags_and_graph_marks():
+    """Meta's handwriting is stored as items tagged by='meta'; cloud sync must keep the tags."""
+    meta_stroke = {
+        "type": "stroke", "color": "#d0452b", "size": 1.9, "sim": False, "mono": True, "op": 0.75,
+        "by": "meta", "mk": "note", "grp": "g1", "say": "Check your signs", "kept": True,
+        "note": {"kind": "note", "target": "L3", "text": "Check your signs"},
+        "pts": [[10, 10, 0.5], [20, 12, 0.5]],
+    }
+    student = {"type": "stroke", "color": "#1f3a7a", "size": 1.8, "sim": True, "pts": [[1, 1, 0.5], [2, 2, 0.5]]}
+    graph = {"type": "mark", "by": "meta", "mk": "graph", "grp": "g2", "html": "<path class=\"ink-stroke\" d=\"M0 0 L5 5\"/>",
+             "box0": [700, 300, 260, 180], "x": 12, "y": -4, "color": "#d0452b", "polys": [[[0, 0], [5, 5]]]}
+    opt, count = quantize_items([meta_stroke, student, graph])
+    assert count == 2
+    m, s, g = opt
+    assert (m["by"], m["mk"], m["grp"], m["kept"], m["mono"], m["op"]) == ("meta", "note", "g1", True, True, 0.75)
+    assert m["note"]["text"] == "Check your signs"
+    assert "by" not in s and "mono" not in s
+    assert g["type"] == "mark" and g["by"] == "meta" and g["box0"] == [700.0, 300.0, 260.0, 180.0]
+    assert (g["x"], g["y"]) == (12.0, -4.0) and g["polys"] == [[[0.0, 0.0], [5.0, 5.0]]]
+
+
 def test_postgresql_dialect_pool_and_rls_context(monkeypatch):
     """Verify PostgreSQL connection pool, RLS set_config, and %s SQL translation with a fake driver."""
     executed_queries: list[tuple[str, tuple]] = []

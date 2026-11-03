@@ -233,6 +233,23 @@ def _decimate_points(pts: list[Any], max_pts: int = MAX_POINTS_PER_STROKE) -> li
     return out
 
 
+# Meta's ink is stored as ordinary items tagged by="meta" (see web/ink.js): keep those tags.
+_META_TAGS = ("by", "mk", "grp", "say", "kept")
+MAX_MARK_HTML = 200_000
+
+
+def _keep_meta_tags(src: dict[str, Any], dst: dict[str, Any]) -> dict[str, Any]:
+    for k in _META_TAGS:
+        v = src.get(k)
+        if v is None or v is False:
+            continue
+        dst[k] = v if isinstance(v, bool) else str(v)[:MAX_TEXT_LEN_PER_ITEM]
+    note = src.get("note")
+    if isinstance(note, dict):
+        dst["note"] = {str(k)[:32]: (str(v)[:MAX_TEXT_LEN_PER_ITEM] if v is not None else None) for k, v in list(note.items())[:8]}
+    return dst
+
+
 def quantize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     """Optimize page items for database storage without visual degradation.
 
@@ -266,7 +283,11 @@ def quantize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], i
             }
             if it.get("hl"):
                 entry["hl"] = True
-            optimized.append(entry)
+            if it.get("mono"):
+                entry["mono"] = True
+            if isinstance(it.get("op"), (int, float)):
+                entry["op"] = round(float(it["op"]), 2)
+            optimized.append(_keep_meta_tags(it, entry))
         elif kind == "textbox":
             text = str(it.get("text", ""))[:MAX_TEXT_LEN_PER_ITEM]
             if not text.strip():
@@ -279,6 +300,26 @@ def quantize_items(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], i
                 "text": text,
                 "color": str(it.get("color", "#1f3a7a"))[:32],
             })
+            _keep_meta_tags(it, optimized[-1])
+        elif kind == "mark":
+            # One of Meta's marks kept as SVG markup (graphs): moved by (x, y), hit-tested by polys.
+            html = str(it.get("html", ""))
+            box = it.get("box0")
+            if not html or len(html) > MAX_MARK_HTML or not isinstance(box, list) or len(box) != 4:
+                continue
+            mark: dict[str, Any] = {
+                "type": "mark",
+                "html": html,
+                "box0": [round(float(v), 1) for v in box],
+                "x": round(float(it.get("x", 0.0)), 1),
+                "y": round(float(it.get("y", 0.0)), 1),
+                "color": str(it.get("color", "#d0452b"))[:32],
+            }
+            polys = it.get("polys")
+            if isinstance(polys, list):
+                mark["polys"] = [_decimate_points(p, 400) for p in polys[:400] if isinstance(p, list)]
+                mark["polys"] = [[pt[:2] for pt in p] for p in mark["polys"] if p]
+            optimized.append(_keep_meta_tags(it, mark))
         elif kind == "image":
             blob_id = str(it.get("blob", "")).strip()
             if not blob_id or blob_id.startswith("data:") or len(blob_id) > 128:
