@@ -38,6 +38,7 @@
     <symbol id="i-hl" viewBox="0 0 24 24"><path d="M9.2 14.8l-3.5 3.5H3.5"/><path d="M7.4 12.6l4 4"/><path d="M7.4 12.6L15.6 4.4a2 2 0 0 1 2.8 0l1.2 1.2a2 2 0 0 1 0 2.8l-8.2 8.2"/><path d="M14 20.5h6.5" stroke-width="2.4"/></symbol>
     <symbol id="i-lasso" viewBox="0 0 24 24"><path d="M12 4c4.4 0 8 2.3 8 5.3s-3.6 5.3-8 5.3-8-2.3-8-5.3S7.6 4 12 4z" stroke-dasharray="2.6 2.4"/><path d="M7.6 13.8c-1.6 1.2-1.4 2.9.3 3.5 1.6.6 1.4 2.3-.4 3.2"/></symbol>
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 15.5l-4.5-4.5-8 8"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></symbol>
     <symbol id="i-suggest" viewBox="0 0 24 24"><path d="M12 4a5.5 5.5 0 0 0-3.2 10c.5.4.8 1 .8 1.6V17h4.8v-1.4c0-.6.3-1.2.8-1.6A5.5 5.5 0 0 0 12 4z"/><path d="M9.8 19.8h4.4"/></symbol>
     <symbol id="i-wake" viewBox="0 0 24 24"><path d="M4.5 10.5v3"/><path d="M8.25 7.5v9"/><path d="M12 4.5v15"/><path d="M15.75 7.5v9"/><path d="M19.5 10.5v3"/></symbol>
@@ -118,6 +119,9 @@
           <button data-act="demo"><b>Try the demo problem</b><small>Types a worked integral with a mistake</small></button>
           <button data-act="hide-meta">Hide Meta’s ink</button>
           <button data-act="clear-meta">Clear Meta’s ink <kbd>Esc</kbd></button>
+          <div class="menu-row"><span>Meta writes in</span><div class="meta-inks" role="group" aria-label="Meta’s ink colour">
+            <button data-meta-ink="#d0452b" style="--c:#d0452b" title="Pencil red" aria-label="Pencil red" aria-pressed="true"></button><button data-meta-ink="#5b6470" style="--c:#5b6470" title="Graphite" aria-label="Graphite" aria-pressed="false"></button><button data-meta-ink="#b0337a" style="--c:#b0337a" title="Magenta" aria-label="Magenta" aria-pressed="false"></button><button data-meta-ink="mine" class="mine" title="Write in my pen colour" aria-pressed="false">My colour</button>
+          </div></div>
           <hr>
           <div class="menu-row"><span>Paper</span><div class="seg mini" id="paper-seg">
             <button data-paper="ruled" aria-pressed="true">Ruled</button><button data-paper="grid" aria-pressed="false">Grid</button><button data-paper="blank" aria-pressed="false">Blank</button>
@@ -157,6 +161,8 @@
             <div class="sel-dots hl">
               <button data-recolor="#ffd426" style="--c:#ffd426" title="Yellow highlight" aria-label="Yellow highlight"></button><button data-recolor="#7fe07a" style="--c:#7fe07a" title="Green highlight" aria-label="Green highlight"></button><button data-recolor="#ff86c3" style="--c:#ff86c3" title="Pink highlight" aria-label="Pink highlight"></button>
             </div>
+            <button data-sel="more" class="sel-act" title="Ask Meta for a more specific hint" hidden>More help</button>
+            <button data-sel="adopt" class="sel-act sel-adopt" title="Make Meta’s ink yours: your colour, and Meta reads it as your work">Make it mine</button>
             <button data-sel="delete" class="sel-del" title="Delete (⌫)"><svg><use href="#i-trash"/></svg><span>Delete</span></button>
           </div>
           <div id="reading" class="reading" hidden><i></i><span>Meta is reading your page…</span></div>
@@ -175,9 +181,14 @@
   <input id="pick-image" type="file" accept="image/*" hidden>
   <input id="pick-page" type="file" accept="image/*,application/pdf,.pdf" hidden>
 
-  <button id="mic" class="mic" data-state="idle" title="Mic on/off: tap to dictate into the bar" aria-pressed="false">
-    <span class="orb"><svg><use href="#i-mic"/></svg></span><span class="label">Mic off</span><kbd class="hint">/</kbd>
-  </button>
+  <div class="dock">
+    <button id="ask" class="mic ask" data-state="idle" title="Ask Meta: opens the command bar (/)">
+      <span class="orb"><svg><use href="#i-spark"/></svg></span><span class="label">Ask Meta</span><kbd class="hint">/</kbd>
+    </button>
+    <button id="mic" class="mic micbtn" data-state="idle" title="Microphone: tap to turn on, tap again to turn off" aria-pressed="false" aria-label="Microphone">
+      <span class="orb"><svg><use href="#i-mic"/></svg></span><span class="label">Mic off</span>
+    </button>
+  </div>
 
   <div id="cmd" class="cmd" hidden>
     <form>
@@ -187,6 +198,7 @@
     </form>
     <div class="vbar"><span class="vstate">Mic off</span><button type="button" class="vengine" hidden>Use Meta transcription</button></div>
     <div class="vnote" role="status" aria-live="polite" hidden></div>
+    <div class="vlog" aria-hidden="true"></div>
     <div class="chips">
       <button data-mode="hint" data-say="help me">Help me</button>
       <button data-mode="check" data-say="check my work">Check my work</button>

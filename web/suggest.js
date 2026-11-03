@@ -13,6 +13,7 @@ export const CHIPS = {
   tidy: { label: 'Tidy', say: 'tidy my writing', mode: 'typeset' },
   graph: { label: 'Graph it', say: 'sketch the graph', mode: 'graph' },
   why: { label: 'Why?', say: 'why does this work?', mode: 'why' },
+  more: { label: 'More help', say: 'more please, be more specific', mode: 'hint' },
 };
 
 /** Ranks the chips for the row the student just wrote. `ctx`: { text, handwritten, hinted }. */
@@ -54,7 +55,7 @@ export class Suggest {
     const lines = this.nb.lines(), { x, y } = this.nb.lastPoint;
     const near = lines.filter(l => y >= l.bbox[1] - 30 && y <= l.bbox[1] + l.bbox[3] + 30).sort((a, b) => Math.abs(a.bbox[0] + a.bbox[2] - x) - Math.abs(b.bbox[0] + b.bbox[2] - x))[0];
     const line = near || lines.at(-1);
-    const strokes = this.nb.items.filter(it => it.type === 'stroke' && !it.hl).length;
+    const strokes = this.nb.items.filter(it => it.type === 'stroke' && !it.hl && it.by !== 'meta').length;   // the student's, not Meta's
     return { lines, line, strokes };
   }
   pageHasMath() {

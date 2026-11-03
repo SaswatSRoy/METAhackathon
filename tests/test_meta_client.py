@@ -132,7 +132,7 @@ def test_transcribe_respects_rate_limiter_and_circuit_breaker(monkeypatch):
     monkeypatch.setenv("META_RATE_LIMIT_PERIOD", "60")
 
     calls = []
-    monkeypatch.setattr(meta_client, "_asr_post", lambda b: calls.append(b) or {"transcript": "integrate x squared"})
+    monkeypatch.setattr(meta_client, "_asr_post", lambda b, mode="PUSH_TO_TALK": calls.append(b) or {"transcript": "integrate x squared"})
 
     assert meta_client.transcribe(WAV) == "integrate x squared"
     assert len(calls) == 1
@@ -156,7 +156,7 @@ def test_transcribe_needs_wav_and_reports_meta_errors(monkeypatch):
     with pytest.raises(ValueError, match="WAV"):
         meta_client.transcribe(b"\x1aE\xdf\xa3webm-bytes")
 
-    def reject(_):
+    def reject(_, mode="PUSH_TO_TALK"):
         raise meta_client.TranscribeError("Meta voice error 400: unsupported WAV")
     monkeypatch.setattr(meta_client, "_asr_post", reject)
     with pytest.raises(meta_client.TranscribeError, match="400"):
@@ -259,3 +259,38 @@ def test_security_sympy_guard_keeps_ordinary_math():
                  "∫_0^1 x^2 dx = 1/3", "[x^3/3]_0^2", "d/dx (x^2+1)^5"):
         assert parse_line(text).ok, text
 
+
+
+def test_asr_retries_without_keywords_when_refused(monkeypatch):
+    import httpx
+    import json as _json
+    sent = []
+
+    def fake_post(url, headers, files, timeout):
+        req = _json.loads(files["request"][1])
+        sent.append(req)
+        if "keywords" in req:
+            return httpx.Response(400, json={"error": {"type": "invalid_request_error", "message": "unknown field keywords"}})
+        return httpx.Response(200, json={"transcript": "check my work", "turns": []})
+    monkeypatch.setenv("MODEL_API_KEY", "test-key")
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert meta_client._asr_post(WAV)["transcript"] == "check my work"
+    assert "keywords" in sent[0] and "keywords" not in sent[1]
+
+
+def test_empty_push_to_talk_retries_with_endpointing(monkeypatch):
+    monkeypatch.setenv("MODEL_API_KEY", "test-key")
+    meta_client.rate_limiter.reset()
+    meta_client.circuit_breaker.reset()
+    modes = []
+
+    def asr(_, mode="PUSH_TO_TALK"):
+        modes.append(mode)
+        if mode == "PUSH_TO_TALK":
+            return {"sessionId": "s1", "transcript": "", "audioDurationMs": 3000, "turns": []}
+        return {"sessionId": "s2", "transcript": "", "audioDurationMs": 3000,
+                "turns": [{"turnId": 1, "transcript": "help me"}]}
+    monkeypatch.setattr(meta_client, "_asr_post", asr)
+    out = meta_client.transcribe_full(WAV)
+    assert modes == ["PUSH_TO_TALK", "ENDPOINTING"]
+    assert out == {"text": "help me", "session": "s2", "audio_ms": 3000}

@@ -33,6 +33,7 @@ from server.db import (
     db,
     decompress_bytes,
     quantize_items,
+    MAX_ITEMS_PER_PAGE,
 )
 
 
@@ -507,6 +508,44 @@ def test_inline_data_url_rejected_in_page_items_and_stroke_decimation():
     assert len(opt[0]["pts"]) == 2500
     assert opt[0]["pts"][0] == [0.0, 0.0, 0.5]
     assert opt[0]["pts"][-1] == [3499.0, 6998.0, 0.5]
+
+
+def test_quantize_keeps_meta_ink_tags_and_graph_marks():
+    """Meta's handwriting is stored as items tagged by='meta'; cloud sync must keep the tags."""
+    meta_stroke = {
+        "type": "stroke", "color": "#d0452b", "size": 1.9, "sim": False, "mono": True, "op": 0.75,
+        "by": "meta", "mk": "note", "grp": "g1", "rid": "p1", "say": "Check your signs", "kept": True,
+        "note": {"kind": "note", "target": "L3", "text": "Check your signs"},
+        "pts": [[10, 10, 0.5], [20, 12, 0.5]],
+    }
+    student = {"type": "stroke", "color": "#1f3a7a", "size": 1.8, "sim": True, "pts": [[1, 1, 0.5], [2, 2, 0.5]]}
+    graph = {"type": "mark", "by": "meta", "mk": "graph", "grp": "g2", "html": "<path class=\"ink-stroke\" d=\"M0 0 L5 5\"/>",
+             "box0": [700, 300, 260, 180], "x": 12, "y": -4, "color": "#d0452b", "polys": [[[0, 0], [5, 5]]]}
+    opt, count = quantize_items([meta_stroke, student, graph])
+    assert count == 2
+    m, s, g = opt
+    assert (m["by"], m["mk"], m["grp"], m["kept"], m["mono"], m["op"]) == ("meta", "note", "g1", True, True, 0.75)
+    assert m["rid"] == "p1"  # which reply wrote it: a queued reply keeps the one before it
+    assert m["note"]["text"] == "Check your signs"
+    assert "by" not in s and "mono" not in s
+    assert g["type"] == "mark" and g["by"] == "meta" and g["box0"] == [700.0, 300.0, 260.0, 180.0]
+    assert (g["x"], g["y"]) == (12.0, -4.0) and g["polys"] == [[[0.0, 0.0], [5.0, 5.0]]]
+
+
+def test_meta_ink_marks_are_one_item_each_and_fit_the_page_cap():
+    """Each of Meta's marks is ONE 'ink' item holding its pen strokes, so 1800 Meta strokes
+    (e.g. 30 hints of 60 strokes) plus 700 student strokes stay far under MAX_ITEMS_PER_PAGE."""
+    seg = lambda i: {"p": [[i, 10.0], [i + 4.0, 14.0], [i + 8.0, 9.0]], "w": 1.9}
+    hints = [{"type": "ink", "by": "meta", "mk": "note", "grp": f"g{h}", "color": "#d0452b", "kept": True, "dim": True,
+              "segs": [seg(float(k)) | ({"o": 0.75} if k == 0 else {}) for k in range(60)]} for h in range(30)]
+    student = [{"type": "stroke", "color": "#1f3a7a", "size": 1.8, "sim": True, "pts": [[1, 1, 0.5], [2, 2, 0.5]]}] * 700
+    opt, count = quantize_items(hints + student)
+    assert len(opt) == 730 < MAX_ITEMS_PER_PAGE
+    assert count == 1800 + 700
+    first = opt[0]
+    assert first["type"] == "ink" and first["by"] == "meta" and first["kept"] is True and first["dim"] is True
+    assert len(first["segs"]) == 60 and first["segs"][0] == {"p": [[0.0, 10.0], [4.0, 14.0], [8.0, 9.0]], "w": 1.9, "o": 0.75}
+    assert "o" not in first["segs"][1]
 
 
 def test_postgresql_dialect_pool_and_rls_context(monkeypatch):

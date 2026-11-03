@@ -558,19 +558,26 @@ def is_wav(data: bytes) -> bool:
     return len(data) > 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE"
 
 
-def _asr_post(audio_bytes: bytes) -> dict[str, Any]:
+def _asr_post(audio_bytes: bytes, mode: str = "PUSH_TO_TALK") -> dict[str, Any]:
     """POST /asr/transcribe: multipart with a JSON `request` part and a WAV `audio` part."""
     import httpx
 
-    settings = {"model": VOICE_MODEL, "audioEncoding": "WAV", "mode": "PUSH_TO_TALK",
-                "keywords": VOICE_KEYWORDS, "languageBias": ["English"]}
-    resp = httpx.post(
-        base_url().rstrip("/") + "/asr/transcribe",
-        headers={"Authorization": f"Bearer {api_key()}", "Accept": "application/json"},
-        files={"request": (None, json.dumps(settings), "application/json"),
-               "audio": ("command.wav", audio_bytes, "audio/wav")},
-        timeout=30.0,
-    )
+    basic = {"model": VOICE_MODEL, "audioEncoding": "WAV", "mode": mode}
+
+    def post(settings: dict[str, Any]):
+        return httpx.post(
+            base_url().rstrip("/") + "/asr/transcribe",
+            headers={"Authorization": f"Bearer {api_key()}", "Accept": "application/json"},
+            files={"request": (None, json.dumps(settings), "application/json"),
+                   "audio": ("command.wav", audio_bytes, "audio/wav")},
+            timeout=30.0,
+        )
+
+    resp = post({**basic, "keywords": VOICE_KEYWORDS, "languageBias": ["English"]})
+    if resp.status_code in (400, 422):
+        # The optional biasing fields are the likeliest thing to be refused: try once with the bare request.
+        log.warning("Meta transcription HTTP %s with keywords; retrying without them", resp.status_code)
+        resp = post(basic)
     if resp.status_code != 200:
         try:
             err = resp.json()
@@ -584,6 +591,15 @@ def _asr_post(audio_bytes: bytes) -> dict[str, Any]:
 
 
 def transcribe(audio_bytes: bytes, filename: str = "command.wav") -> str:
+    return transcribe_full(audio_bytes, filename)["text"]
+
+
+def _asr_text(body: dict[str, Any]) -> str:
+    text = body.get("transcript") or " ".join(t.get("transcript", "") for t in body.get("turns") or [])
+    return (text or "").strip()
+
+
+def transcribe_full(audio_bytes: bytes, filename: str = "command.wav") -> dict[str, Any]:
     """Muse Voice Transcribe on a 16 or 24 kHz mono 16-bit WAV (the browser converts).
 
     Raises OfflineError offline or when the call can't be made (caller returns 503),
@@ -611,6 +627,11 @@ def transcribe(audio_bytes: bytes, filename: str = "command.wav") -> str:
         raise OfflineError("rate limit exceeded")
     try:
         body = _asr_post(audio_bytes)
+        if not _asr_text(body):
+            # Push-to-talk heard nothing: ask once more with Meta's own speech detection.
+            log.warning("Meta transcription empty (session %s, %s ms); retrying in ENDPOINTING mode",
+                        body.get("sessionId"), body.get("audioDurationMs"))
+            body = _asr_post(audio_bytes, "ENDPOINTING")
         circuit_breaker.record_success()
     except TranscribeError:
         circuit_breaker.record_success()               # Meta answered; the audio was the problem
@@ -619,5 +640,7 @@ def transcribe(audio_bytes: bytes, filename: str = "command.wav") -> str:
         circuit_breaker.record_failure()
         log.warning("Meta transcription failed: %s", type(exc).__name__)
         raise OfflineError("transcription failed") from exc
-    text = body.get("transcript") or " ".join(t.get("transcript", "") for t in body.get("turns") or [])
-    return (text or "").strip()
+    text = _asr_text(body)
+    if not text:
+        log.warning("Meta transcription empty again (session %s, %s ms)", body.get("sessionId"), body.get("audioDurationMs"))
+    return {"text": text, "session": body.get("sessionId"), "audio_ms": body.get("audioDurationMs")}

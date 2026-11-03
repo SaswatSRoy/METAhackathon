@@ -13,12 +13,12 @@ from pathlib import Path
 import time
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import auth, db as db_module, meta_client, router, skills
+from . import auth, db as db_module, meta_client, realtime, router, skills
 from .auth import (
     AuthError,
     REFRESH_COOKIE_NAME,
@@ -277,10 +277,16 @@ annotate = skills.annotate  # kept for callers of the old location
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    out = {"ok": True, "offline": meta_client.is_offline(), "model": CHAT_MODEL}
+    out = {"ok": True, "offline": meta_client.is_offline(), "model": CHAT_MODEL, "realtime": realtime.available()}
     if router.enabled():
         out["router"] = {"model": os.getenv("ROUTER_MODEL", ""), "circuit_breaker": router.circuit_breaker.state}
     return out
+
+
+@app.websocket("/ws/voice")
+async def voice_ws(ws: WebSocket) -> None:
+    """Live voice: microphone audio in, Meta's words out as you speak (see server/realtime.py)."""
+    await realtime.voice_socket(ws)
 
 
 @app.get("/api/health/db")
@@ -345,7 +351,7 @@ def assist(
 
 
 @app.post("/api/transcribe")
-def transcribe(audio: UploadFile = File(...)) -> dict[str, str]:
+def transcribe(audio: UploadFile = File(...)) -> dict[str, Any]:
     # Plain def: the upstream call blocks, so FastAPI runs this in its threadpool.
     data = audio.file.read(meta_client.MAX_AUDIO_BYTES + 1)
     if not data:
@@ -353,7 +359,7 @@ def transcribe(audio: UploadFile = File(...)) -> dict[str, str]:
     if len(data) > meta_client.MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="audio too large")
     try:
-        return {"text": meta_client.transcribe(data, audio.filename or "command.wav")}
+        return meta_client.transcribe_full(data, audio.filename or "command.wav")
     except ValueError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
     except meta_client.TranscribeError as exc:

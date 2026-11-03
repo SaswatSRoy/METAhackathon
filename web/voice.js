@@ -3,14 +3,16 @@
 //
 // Two engines:
 //   browser: Web Speech (webkitSpeechRecognition). Words appear live as you speak. Chrome, Edge, Safari.
-//   meta:    record, then Muse Voice Transcribe on the server. Words appear when the mic turns off.
+//   meta:    Muse Voice Transcribe. Live over a WebSocket (/ws/voice) where the server can hold one, so
+//            words appear as you speak; otherwise (Vercel) record a clip and send it when the mic turns off.
 // The browser engine is the default when it exists; if it can't run here it switches to Meta by itself.
 // "Hey Meta" wake mode (continuous listening for the wake word) uses the browser engine.
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const WAKE = /\b(?:hey|hi|hay|ok|okay),?\s*(?:meta|metta|matter|medha|mehta|meda)\b[\s,.!?]*/i;
-export const SILENCE_MS = 60000;                     // turn off after a minute with no speech
+export const SILENCE_MS = 10000;                     // turn off after 10 s with no speech
 const META_MAX_MS = 120000;                          // 2 min of 16 kHz WAV is ~3.8 MB, under Vercel's 4.5 MB body limit
 const WAV_RATE = 16000;
+const LIVE_RATE = 24000;                             // Meta live voice takes PCM_24KHZ
 const ENGINE_KEY = 'margin.voiceEngine';
 // Web Speech errors that mean "this browser can't do speech here": use Meta instead.
 const SWITCH_ERRORS = new Set(['network', 'service-not-allowed', 'language-not-supported']);
@@ -27,6 +29,9 @@ const clean = t => stripWake(t.replace(/\s+/g, ' ')).replace(/^[,.!?\s]+/, '');
 
 // Muse Voice Transcribe takes only 16-bit mono PCM WAV at 16 or 24 kHz, and browsers record
 // webm/opus (Chrome) or mp4/aac (Safari). Decode the recording and write it out as WAV.
+// Speech is also trimmed (the 10 s of silence before the mic turns off is dropped) and brought up to a
+// clear level, since a quiet laptop mic can come back from Meta as "no words".
+export const QUIET_PEAK = 0.01;                      // below this the mic recorded silence
 export async function toWav(blob) {
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC();
@@ -35,19 +40,34 @@ export async function toWav(blob) {
     const buf = await new Promise((ok, bad) => { const p = ctx.decodeAudioData(bytes, ok, bad); p?.then?.(ok, bad); });
     const chans = [...Array(buf.numberOfChannels)].map((_, c) => buf.getChannelData(c));
     const step = buf.sampleRate / WAV_RATE, n = Math.floor(buf.length / step);
-    const out = new DataView(new ArrayBuffer(44 + n * 2));
-    const str = (o, t) => [...t].forEach((ch, i) => out.setUint8(o + i, ch.charCodeAt(0)));
-    str(0, 'RIFF'); out.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
-    out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
-    out.setUint32(24, WAV_RATE, true); out.setUint32(28, WAV_RATE * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
-    str(36, 'data'); out.setUint32(40, n * 2, true);
+    const mono = new Float32Array(n);
+    let peak = 0;
     for (let i = 0; i < n; i++) {                      // average each window: mono and anti-aliased
       const a = Math.floor(i * step), b = Math.max(a + 1, Math.floor((i + 1) * step));
       let sum = 0; for (const ch of chans) for (let j = a; j < b; j++) sum += ch[j] || 0;
-      const v = Math.max(-1, Math.min(1, sum / ((b - a) * chans.length)));
+      const v = sum / ((b - a) * chans.length);
+      mono[i] = v; if (Math.abs(v) > peak) peak = Math.abs(v);
+    }
+    // Trim to the loud part, keeping 0.4 s either side so first and last words aren't clipped.
+    const gate = Math.max(peak * 0.08, 0.003), pad = Math.round(WAV_RATE * 0.4);
+    let first = 0, last = n - 1;
+    while (first < n && Math.abs(mono[first]) < gate) first++;
+    while (last > first && Math.abs(mono[last]) < gate) last--;
+    const from = Math.max(0, first - pad), to = Math.min(n, last + pad + 1), len = Math.max(0, to - from);
+    const gain = peak > 0 ? Math.min(0.9 / peak, 30) : 1;   // up to 30x for a quiet mic
+    const out = new DataView(new ArrayBuffer(44 + len * 2));
+    const str = (o, t) => [...t].forEach((ch, i) => out.setUint8(o + i, ch.charCodeAt(0)));
+    str(0, 'RIFF'); out.setUint32(4, 36 + len * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+    out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
+    out.setUint32(24, WAV_RATE, true); out.setUint32(28, WAV_RATE * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+    str(36, 'data'); out.setUint32(40, len * 2, true);
+    for (let i = 0; i < len; i++) {
+      const v = Math.max(-1, Math.min(1, mono[from + i] * gain));
       out.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
     }
-    return new Blob([out.buffer], { type: 'audio/wav' });
+    const wav = new Blob([out.buffer], { type: 'audio/wav' });
+    wav.peak = peak; wav.seconds = len / WAV_RATE; wav.recorded = n / WAV_RATE;
+    return wav;
   } finally { ctx.close?.(); }
 }
 
@@ -70,6 +90,7 @@ export class Voice {
     if (remember) try { localStorage.setItem(ENGINE_KEY, e); } catch { /* private mode */ }
     this.state(this.on ? 'on' : 'off');
   }
+  log(msg) { this.trail = [...(this.trail || []).slice(-3), msg]; this.h.onLog?.(`${this.engine === 'browser' ? 'browser speech' : 'Meta'}: ${this.trail.join(' → ')}`); }
   state(s, detail = '') { this.h.onState?.(s, detail || this.engineName); }
   fail(msg) { console.warn('[margin] voice:', msg); this.h.onError?.(msg); }
 
@@ -83,15 +104,20 @@ export class Voice {
     this.on = true;
     this.lastSpeech = Date.now();
     clearInterval(this.watch);
-    this.watch = setInterval(() => { if (this.on && Date.now() - this.lastSpeech > SILENCE_MS) { this.stop(); this.h.onError?.('Mic turned off after a minute of silence.'); } }, 1000);
+    this.watch = setInterval(() => { if (this.on && Date.now() - this.lastSpeech > SILENCE_MS) { this.stop(); this.h.onError?.('Mic turned off after 10 seconds of silence.'); } }, 1000);
     if (this.engine === 'browser') this.startBrowser(); else this.startMeta();
   }
   stop() {
     if (!this.on) return;
     this.on = false;
     clearInterval(this.watch);
+    this.log('mic off');
+    if (this.liveStop) { this.liveStop(); return; }                                 // live socket: Meta sends the last words
     if (this.recording?.state === 'recording') { this.recording.stop(); return; }   // onstop transcribes
-    const r = this.rec; this.rec = null; try { r?.stop(); } catch { /* not started */ }
+    const r = this.rec; this.rec = null;
+    try { r?.stop(); } catch { /* not started */ }
+    // Safari sometimes never ends a stopped session (the mic stays live): force it after a moment.
+    if (r) setTimeout(() => { try { r.abort(); } catch { /* already ended */ } }, 1200);
     this.state('off');
   }
 
@@ -103,6 +129,8 @@ export class Voice {
       const rec = this.rec = new SR();
       rec.lang = navigator.language || 'en-US'; rec.continuous = true; rec.interimResults = true;
       let sessionFinal = '';
+      rec.onaudiostart = () => this.log('listening');
+      rec.onspeechstart = () => { this.lastSpeech = Date.now(); this.log('hearing speech'); };
       rec.onresult = e => {
         this.lastSpeech = Date.now();
         let interim = '';
@@ -114,7 +142,8 @@ export class Voice {
         this.h.onText?.(clean(this.prefix + this.finalText + sessionFinal + interim));
       };
       rec.onerror = e => {
-        if (e.error === 'aborted' || e.error === 'no-speech') return;    // silence: the minute timer decides
+        this.log(`error ${e.error}`);
+        if (e.error === 'aborted' || e.error === 'no-speech') return;    // silence: the 10 s timer decides
         if (SWITCH_ERRORS.has(e.error) && window.MediaRecorder) {
           this.on = false; this.rec = null;
           this.setEngine('meta', false);
@@ -141,7 +170,7 @@ export class Voice {
   // ---- meta engine: record, then transcribe ------------------------------------------------------
   async serverReady() {
     if (this.serverOk === undefined) {
-      try { this.serverOk = !(await (await fetch('/api/health')).json()).offline; }
+      try { const h = await (await fetch('/api/health')).json(); this.serverOk = !h.offline; this.realtime = !!h.realtime && !!window.WebSocket; }
       catch { return false; }
     }
     return this.serverOk;
@@ -158,9 +187,14 @@ export class Voice {
       return;
     }
     let stream;
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true } }); }
     catch (err) { ctx?.close?.(); this.on = false; this.state('off'); this.fail(`Microphone blocked (${err.name || 'error'}). Allow the mic for this site.`); return; }
     if (!this.on) { stream.getTracks().forEach(t => t.stop()); ctx?.close?.(); return; }   // turned off while asking
+    if (this.realtime && ctx) {
+      try { await this.startLive(ctx, stream); return; }
+      catch (err) { this.log(`live voice unavailable (${err.message}), recording instead`); }
+      if (!this.on) { stream.getTracks().forEach(t => t.stop()); ctx?.close?.(); return; }
+    }
     const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(t => MediaRecorder.isTypeSupported?.(t));
     const rec = new MediaRecorder(stream, type ? { mimeType: type } : undefined), chunks = [];
     this.recording = rec;
@@ -178,19 +212,102 @@ export class Voice {
         let wav;
         try { wav = await toWav(blob); }
         catch { throw new Error(`This browser’s recording (${blob.type || 'unknown type'}) couldn’t be converted to WAV for Meta.`); }
+        const level = Math.round(wav.peak * 100);
+        this.log(`mic level ${level}%, ${wav.seconds.toFixed(1)} s of sound`);
+        if (wav.peak < QUIET_PEAK) throw new Error(`The microphone recorded silence (level ${level}%). Check that the right mic is selected in your computer’s sound settings and in the browser’s site settings.`);
+        this.log(`sending ${Math.round(wav.size / 1024)} KB WAV`);
         const fd = new FormData(); fd.append('audio', wav, 'command.wav');
         const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
         if (!r.ok) {
           const detail = await r.json().then(j => j.detail, () => '');
           throw new Error(`Meta voice failed (HTTP ${r.status}): ${detail || UPLOAD_ERRORS[r.status] || 'server error'}`);
         }
-        const text = clean(this.prefix + ((await r.json()).text || ''));
-        if (text) this.h.onText?.(text); else throw new Error('Meta heard no words. Try again, a little closer to the mic.');
+        const body = await r.json();
+        this.log(`Meta replied${body.audio_ms != null ? ` (heard ${(body.audio_ms / 1000).toFixed(1)} s)` : ''}`);
+        const text = clean(this.prefix + (body.text || ''));
+        if (text) this.h.onText?.(text);
+        else throw new Error(`Meta got ${wav.seconds.toFixed(1)} s of audio (level ${level}%) but found no words${body.session ? ` (session ${body.session})` : ''}. ` + (SR ? 'Try Browser speech in the bar instead.' : 'Try again, speaking a little louder.'));
       } catch (err) {
         this.fail(err.message || String(err));
       } finally { this.state('off'); }
     };
     rec.start(250);
+    this.log(`recording (${rec.mimeType || 'default format'})`);
+  }
+
+  // ---- Meta live: stream the mic over a WebSocket, words come back as you speak ------------------
+  // Resolves once Meta accepts the session; rejects (so the caller records a clip instead) if it can't.
+  startLive(ctx, stream) {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/voice`);
+      ws.binaryType = 'arraybuffer';
+      let ready = false, finalText = '', partial = '', proc = null, src = null, done = false;
+      const fail = msg => { clearTimeout(wait); stopCapture(); try { ws.close(); } catch { /* closed */ } reject(new Error(msg)); };
+      const wait = setTimeout(() => !ready && fail('no answer in 6 s'), 6000);
+      const words = () => clean(this.prefix + finalText + partial);
+      const stopCapture = () => { try { proc?.disconnect(); src?.disconnect(); } catch { /* gone */ } proc = src = null; };
+      const finish = () => {
+        if (done) return; done = true;
+        stopCapture(); clearTimeout(this.liveFlush);
+        this.liveStop = null; this.on = false;
+        stream.getTracks().forEach(t => t.stop()); ctx.close?.();
+        const text = words();
+        if (text) { this.h.onText?.(text); this.log('done'); }
+        else this.fail(SR ? 'Meta live heard no words. Try again a little louder, or use Browser speech in the bar.' : 'Meta live heard no words. Try again a little louder.');
+        this.state('off');
+      };
+      const capture = () => {
+        // ScriptProcessor works in every browser (AudioWorklet needs another file); resample to 24 kHz.
+        src = ctx.createMediaStreamSource(stream);
+        proc = ctx.createScriptProcessor(2048, 1, 1);
+        const step = ctx.sampleRate / LIVE_RATE;
+        let pos = 0;
+        proc.onaudioprocess = e => {
+          const inp = e.inputBuffer.getChannelData(0);
+          const n = Math.floor((inp.length - pos) / step);
+          if (n <= 0 || ws.readyState !== 1) return;
+          const out = new Int16Array(n);
+          let peak = 0;
+          for (let i = 0; i < n; i++) {
+            const a = Math.floor(pos + i * step), b = Math.max(a + 1, Math.floor(pos + (i + 1) * step));
+            let sum = 0; for (let j = a; j < b && j < inp.length; j++) sum += inp[j];
+            const v = Math.max(-1, Math.min(1, sum / (b - a)));
+            out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+            if (Math.abs(v) > peak) peak = Math.abs(v);
+          }
+          pos = pos + n * step - inp.length;
+          if (peak > 0.02) this.lastSpeech = Date.now();
+          ws.send(out.buffer);
+        };
+        src.connect(proc); proc.connect(ctx.destination);   // Chrome only runs a connected processor
+        ctx.resume?.();
+      };
+      ws.onmessage = e => {
+        let m; try { m = JSON.parse(e.data); } catch { return; }
+        if (m.type === 'ready') {
+          ready = true; clearTimeout(wait);
+          if (!this.on) { ws.close(); finish(); resolve(); return; }
+          this.log('live: connected, speak now');
+          capture();
+          this.state('on', 'Meta live voice');
+          this.liveStop = () => {
+            stopCapture(); this.on = false; clearInterval(this.watch);
+            this.state('transcribing', 'Meta is finishing…');
+            try { ws.send(JSON.stringify({ type: 'endStream' })); } catch { /* closed */ }
+            this.liveFlush = setTimeout(() => { try { ws.close(); } catch { /* closed */ } finish(); }, 8000);
+          };
+          resolve();
+        } else if (m.type === 'transcript' || m.type === 'speechComplete') {
+          this.lastSpeech = Date.now();
+          if (m.final) { finalText += m.transcript + ' '; partial = ''; } else partial = m.transcript;
+          this.h.onText?.(words());
+        } else if (m.type === 'error') {
+          if (!ready) fail(m.message); else this.log(`error: ${m.message}`);
+        }
+      };
+      ws.onerror = () => { if (!ready) fail('socket error'); };
+      ws.onclose = () => { if (!ready) fail('socket closed'); else finish(); };
+    });
   }
 
   // Keep the one-minute silence timer fed while the student talks (Meta engine has no live words).

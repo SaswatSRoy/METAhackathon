@@ -1,7 +1,7 @@
 // Margin: wires the shelf, the notebook page, pages, Meta's ink, voice and the command pill together.
-import { Notebook, PAGE_W, PAGE_H, PEN_SIZES, rowY, RULE } from './ink.js';
+import { Notebook, PAGE_W, PAGE_H, PEN_SIZES, rowY, RULE, isMeta } from './ink.js';
 import { saveImage, savePdfPages, isPdf } from './images.js';
-import { MetaInk, assist } from './assistant.js';
+import { MetaInk, assist, META_COLOR } from './assistant.js';
 import { Suggest } from './suggest.js';
 import { Voice } from './voice.js';
 import { store, authClient, newPage, createNotebook } from './store.js';
@@ -22,10 +22,56 @@ const nb = new Notebook({
   onErase: (pt, R) => meta.erase(pt, R),
   onChange: kind => { dismissCoach(); scheduleSave(); syncBg(); if (kind === 'stroke' || kind === 'text') scheduleAutoCheck(); },
   onSelect: box => showSelBar(box),
+  onLongPress: it => pickMetaMark(it),
+  beforeStroke: (s, { tap, ptype }) => {
+    if (tap && meta.writing) { meta.skip(); return true; }                 // tap while Meta writes: finish now
+    const p0 = { x: s.pts[0][0], y: s.pts[0][1] };
+    const pv = !s.hl && meta.previewAt(p0);
+    if (pv && tap && ptype === 'pen') { meta.decide(pv.pid, 'accept'); return true; }   // Pencil tap on the faint ink
+    const old = tap && nb.metaAt(p0);
+    if (old?.dim) {                                                          // tap a faded hint: bring it back
+      for (const it of hintGroup(old)) { delete it.dim; delete it.below; }
+      nb.redraw(); scheduleSave(); return true;
+    }
+    return false;
+  },
+  afterStroke: s => {
+    const pv = !s.hl && meta.previewAt({ x: s.pts[0][0], y: s.pts[0][1] });
+    if (pv) meta.dismiss(pv.pid);                                            // writing over a preview dismisses it
+    if (!s.hl) fadeOldHints(s);
+  },
 });
+// A hint's marks: its note and the circle / underline / arrow written by the same reply, so they fade
+// and come back together. Kept (moved, recoloured, accepted) ink never fades.
+const FADES = new Set(['note', 'circle', 'underline']);
+function hintGroup(it) {
+  const same = x => it.rid ? x.rid === it.rid : x.grp === it.grp;
+  return nb.items.filter(x => x.by === 'meta' && FADES.has(x.mk) && !x.kept && same(x));
+}
+// Old hints fade (to 40%) once the student has written two more strokes just under them (within
+// three rows below the hint, across its width); a tap brings one back.
+function fadeOldHints(s) {
+  const [sx, top, sw] = s.bbox;
+  for (const note of nb.items.filter(it => it.by === 'meta' && it.mk === 'note' && !it.kept && !it.dim)) {
+    const g = hintGroup(note), [gx, gy, gw, gh] = unionRect(g.map(it => it.bbox));
+    const bottom = gy + gh;
+    if (top < bottom - 6 || top > bottom + 3 * RULE || sx + sw < gx - 40 || sx > gx + gw + 40) continue;
+    note.below = (note.below || 0) + 1;
+    if (note.below >= 2) for (const it of g) it.dim = true;
+  }
+}
+function unionRect(bs) {
+  const x0 = Math.min(...bs.map(b => b[0])), y0 = Math.min(...bs.map(b => b[1]));
+  return [x0, y0, Math.max(...bs.map(b => b[0] + b[2])) - x0, Math.max(...bs.map(b => b[1] + b[3])) - y0];
+}
+// Meta's ink colour: one of a few pencils, or 'mine' (the student's pen colour at the time Meta writes).
+const META_INKS = { '#d0452b': 'Pencil red', '#5b6470': 'Graphite', '#b0337a': 'Magenta', mine: 'My pen colour' };
+let metaInk = META_COLOR;
+try { const v = localStorage.getItem('margin.metaInk'); if (v in META_INKS) metaInk = v; } catch { /* private mode */ }
+const metaColor = () => metaInk === 'mine' ? nb.color : metaInk;
 const meta = new MetaInk($('#meta'), nb, {
   onReveal: reveal,
-  onNoteTap: () => callMeta('more please, be more specific', 'hint', { escalate: true }),
+  inkColor: metaColor,
   onRedo: ask => ask ? callMeta(ask.command, ask.mode, { hintLevel: ask.hint_level }) : callMeta('just give me the answer', 'answer'),
   onCommit: () => scheduleSave(),
 });
@@ -84,6 +130,8 @@ async function openNotebook(id, pageId) {
   if (!pages.length) { const p = newPage(book.id); await store.putPage(p); pages.push(p); }
   book.pages = pages.map(p => p.id);
   Object.assign(state, { book, pages });
+  if (book.metaInk in META_INKS) metaInk = book.metaInk;              // Meta's colour follows the notebook
+  showMetaInk();
   $('#nb-title').textContent = book.title;
   $('#paper-title').textContent = book.title;
   document.title = `${book.title} · Margin`;
@@ -92,6 +140,18 @@ async function openNotebook(id, pageId) {
   const i = Math.max(0, pages.findIndex(p => p.id === pageId));
   await showPage(i, { force: true });
   sidebar.render(state.pages, state.idx);
+  firstRunTip();
+}
+
+// Once per browser, on a new notebook's empty first page, Meta writes how to use it in the margin.
+async function firstRunTip() {
+  try { if (localStorage.getItem('margin.tipShown')) return; } catch { return; }
+  if (state.idx !== 0 || nb.items.length || current()?.meta?.length) return;
+  try { localStorage.setItem('margin.tipShown', '1'); } catch { return; }
+  const pageId = current().id;
+  await sleep(500);
+  if (current()?.id !== pageId || nb.items.length) return;
+  if (await meta.writeTip() && current()?.id === pageId) saveNow();
 }
 
 async function showPage(i, { force = false } = {}) {
@@ -102,13 +162,13 @@ async function showPage(i, { force = false } = {}) {
   suggest.cancel();
   state.idx = i;
   const p = current();
-  meta.restore(p.meta);
-  nb.load(p.items, histFor(p.id));
+  const { live, items } = meta.split(p.meta);        // older pages: finished marks become notebook items
+  meta.restore(live);
+  nb.load([...(p.items || []), ...items], histFor(p.id));
   hintMemo = null;
   setPaper(p.paper, false);
   syncBg();
-  page.classList.remove('meta-hidden');
-  $('[data-act="hide-meta"]').textContent = 'Hide Meta’s ink';
+  setMetaHidden(false);
   $('#page-num').textContent = `${i + 1} / ${state.pages.length}`;
   $('#prev-page').disabled = i === 0;
   $('#next-page').disabled = i === state.pages.length - 1;
@@ -234,6 +294,7 @@ $$('[data-tool]').forEach(b => b.onclick = () => setTool(b.dataset.tool));
 $$('.swatches.pen [data-color]').forEach(b => b.onclick = () => {
   if (nb.tool === 'lasso' && nb.sel.length) { nb.recolorSelection(b.dataset.color, false); return; }
   nb.setColor(b.dataset.color);
+  if (metaInk === 'mine') meta.syncColor();
   $$('.swatches.pen [data-color]').forEach(x => x.setAttribute('aria-pressed', x === b));
   if (nb.tool === 'eraser' || nb.tool === 'lasso' || nb.tool === 'highlighter') setTool('pen');
 });
@@ -251,15 +312,21 @@ selBar.onclick = e => {
   if (!b) return;
   if (b.dataset.recolor) nb.recolorSelection(b.dataset.recolor, b.closest('.hl') != null);
   if (b.dataset.sel === 'delete') nb.deleteSelection();
+  if (b.dataset.sel === 'adopt' && nb.adoptSelection()) toast('It’s yours now: Meta will read it as your work.', { label: 'Undo', fn: () => nb.undo() });
+  if (b.dataset.sel === 'more') { nb.clearSelection(); callMeta('more please, be more specific', 'hint', { escalate: true }); }
 };
 function showSelBar(box) {
   const selBar = $('#sel-bar');                     // looked up here: zoom calls this while the app is starting
   if (!box) { selBar.hidden = true; return; }
+  const metaSel = nb.sel.filter(isMeta);
+  selBar.classList.toggle('has-meta', metaSel.length > 0);
+  selBar.querySelector('[data-sel="more"]').hidden = !metaSel.some(it => it.mk === 'note');
+  selBar.querySelector('[data-sel="delete"] span').textContent = metaSel.length && metaSel.length === nb.sel.length ? 'Remove' : 'Delete';
   const k = 1 / Math.max(0.3, nb.scale);
   selBar.hidden = false;
   const above = box[1] > 64 * k;
   Object.assign(selBar.style, {
-    left: `${clamp(box[0], 4, PAGE_W - 330 * k)}px`, top: `${above ? box[1] - 8 : box[1] + box[3] + 8}px`,
+    left: `${clamp(box[0], 4, PAGE_W - (selBar.offsetWidth || 330) * k - 4)}px`, top: `${above ? box[1] - 8 : box[1] + box[3] + 8}px`,
     transform: `scale(${k})${above ? ' translateY(-100%)' : ''}`,
   });
 }
@@ -346,7 +413,7 @@ more.onclick = e => { e.stopPropagation(); setMenu(menu.hidden); };
 document.addEventListener('pointerdown', e => {
   if (!e.target.closest('.menu-wrap')) setMenu(false);
   if (!e.target.closest('.img-wrap')) setImgMenu(false);
-  if (!e.target.closest('#cmd, #mic') && !voice.on && $('#mic').dataset.state !== 'transcribing') closeCmd();
+  if (!e.target.closest('#cmd, #mic, #ask') && !voice.on && $('#mic').dataset.state !== 'transcribing') closeCmd();
 });
 menu.onclick = e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
@@ -360,15 +427,50 @@ menu.onclick = e => {
   setMenu(false);
   if (act === 'demo') demo();
   if (act === 'clear-meta') clearMeta();
-  if (act === 'hide-meta') {
-    const hidden = page.classList.toggle('meta-hidden');
-    e.target.closest('button').textContent = hidden ? 'Show Meta’s ink' : 'Hide Meta’s ink';
-  }
+  if (act === 'hide-meta') setMetaHidden(!nb.metaHidden);
   if (act === 'account') openAccountModal();
   if (act === 'export-png') exportCurrentPNG();
   if (act === 'export-pdf') exportNotebookPDF();
 };
 function clearMeta() { if (meta.clear(true)) { scheduleSave(); toast('Cleared Meta’s ink.', { label: 'Undo', fn: () => nb.undo() }); } }
+
+// Hide / show Meta's ink (menu and the toolbar eye): previews, labels and Meta's items on the canvas.
+function setMetaHidden(hidden) {
+  page.classList.toggle('meta-hidden', hidden);
+  if (nb.metaHidden !== hidden) nb.setMetaHidden(hidden);
+  $('[data-act="hide-meta"]').textContent = hidden ? 'Show Meta’s ink' : 'Hide Meta’s ink';
+  $('#meta-eye').setAttribute('aria-pressed', !hidden);
+  $('#meta-eye').setAttribute('aria-label', hidden ? 'Meta’s ink: hidden' : 'Meta’s ink: shown');
+}
+$('#meta-eye').onclick = () => setMetaHidden(!nb.metaHidden);
+
+// Meta's ink colour (menu). Changing it recolours Meta's ink on this page in one undoable step.
+function showMetaInk() {
+  $$('[data-meta-ink]').forEach(b => b.setAttribute('aria-pressed', b.dataset.metaInk === metaInk));
+  meta.syncColor();
+}
+$$('[data-meta-ink]').forEach(b => b.onclick = e => {
+  e.stopPropagation();
+  const prev = metaColor();
+  metaInk = b.dataset.metaInk;
+  try { localStorage.setItem('margin.metaInk', metaInk); } catch { /* private mode */ }
+  if (state.book) { state.book.metaInk = metaInk; store.putNotebook(state.book).catch(() => {}); }
+  const n = meta.recolor(prev, metaColor());
+  showMetaInk();
+  if (n) scheduleSave();
+  toast(`Meta now writes in ${META_INKS[metaInk].toLowerCase()}.`, n ? { label: 'Undo', fn: () => nb.undo() } : undefined);
+});
+
+// Long-press (or right-click) on Meta's ink: pick up that whole mark with the lasso, so the bar
+// offers Remove, Make it mine, a recolour and (for a hint) More help.
+function pickMetaMark(it) {
+  setTool('lasso');
+  nb.setSelection(nb.items.filter(x => isMeta(x) && (x === it || (it.grp && x.grp === it.grp))));
+}
+page.addEventListener('contextmenu', e => {
+  const it = nb.metaAt(zoom.pagePoint({ x: e.clientX, y: e.clientY }));
+  if (it) { e.preventDefault(); pickMetaMark(it); }
+});
 
 async function exportCurrentPNG() {
   nb.commitInput();
@@ -398,8 +500,14 @@ function nextHintLevel(lines, sig, escalate) {
   return same || escalate ? Math.min(3, hintMemo.level + 1) : 1;
 }
 
-async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null } = {}) {
-  if (busy || !current()) return;
+let queued = null;
+async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null, spare = false } = {}) {
+  if (!current()) return;
+  if (busy || meta.writing) {                        // Meta is busy: do it next instead of dropping it
+    queued = [command, mode, { escalate, hintLevel, spare: true }];
+    toast(`Meta is still writing. It’ll do “${command.length > 40 ? command.slice(0, 39) + '…' : command}” next.`);
+    return;
+  }
   nb.commitInput();
   dismissCoach();
   const lines = nb.lines();
@@ -422,14 +530,14 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
   showReading(true);
   try {
     const resp = await assist(payload);
-    showReading(false);
     if (current()?.id !== pageId) return;           // the student turned the page meanwhile
+    showReading('writing');
     showTrace(resp.agent_trace);
     const wrong = resp.first_wrong && ((resp.lines || []).find(l => l.id === resp.first_wrong) || lines.find(l => l.id === resp.first_wrong));
     hintMemo = resp.mode === 'hint' && wrong ? { sig, text: wrong.text, level: payload.hint_level } : null;
     nb.checkpoint();                                 // undo removes Meta's new ink
-    page.classList.remove('meta-hidden');
-    await meta.render(resp, lines, { command, mode, hint_level: payload.hint_level });
+    setMetaHidden(false);
+    await meta.render(resp, lines, { command, mode, hint_level: payload.hint_level }, { spare });
     if (current()?.id === pageId) {
       saveNow();
       // After a hint: offer "Why?" and the next step right by it.
@@ -446,7 +554,16 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
   } finally {
     busy = false;
     showReading(false);
+    runQueued();
   }
+}
+// The queued command runs only once the reply before it has finished writing and is baked into the
+// page, and its reply keeps that answer (render's spare) instead of replacing it.
+function runQueued() {
+  if (!queued) return;
+  if (busy || meta.writing) { setTimeout(runQueued, 120); return; }
+  const q = queued; queued = null;
+  setTimeout(() => callMeta(...q), 60);
 }
 
 // What Meta did, as a tiny fading breadcrumb by the Hey Meta button: "Meta: read page → checked steps → wrote hint".
@@ -481,10 +598,15 @@ function showTrace(trace) {
   traceTimer = setTimeout(() => { el.classList.remove('show'); traceTimer = setTimeout(() => { el.hidden = true; }, 600); }, 4000);
 }
 
+// on: true while Meta reads the page, 'writing' while it writes (tap the page to skip), false when done.
 function showReading(on) {
   const r = $('#reading');
-  $('#mic').classList.toggle('thinking', on);
+  ask.classList.toggle('thinking', !!on);
+  r.querySelector('span').textContent = on === 'writing' ? 'Meta is writing… tap to skip' : 'Meta is reading your page…';
+  askLabel.textContent = on === 'writing' ? 'Meta is writing…' : on ? 'Meta is reading…' : askIdle();
   if (!on) { r.hidden = true; return; }
+  if (on === 'writing') { r.classList.add('writing'); return; }     // stays where it was, by the pen
+  r.classList.remove('writing');
   const { x, y } = nb.lastPoint;
   r.style.left = `${clamp(x + 24, 110, PAGE_W - 270)}px`;
   r.style.top = `${clamp(y - 58, 70, PAGE_H - 60)}px`;
@@ -506,7 +628,7 @@ autoBtn.onclick = () => {
 const lastHint = () => meta.marks.some(m => m.kind === 'note' && m.note);
 const suggest = new Suggest(page, {
   nb, enabled: suggestOn, hinted: lastHint,
-  canShow: () => !busy && !!state.book && cmd.hidden,
+  canShow: () => !busy && !queued && !!state.book && cmd.hidden,
   onPick: c => callMeta(c.say, c.mode),
 });
 function scheduleAutoCheck() { suggest.poke(); }
@@ -556,6 +678,7 @@ addEventListener('keydown', e => {
   if (mod && k === '0') { e.preventDefault(); zoom.reset(); return; }
   if (typing || mod || e.altKey) return;
   if (k === 'enter' && !cmd.hidden) { e.preventDefault(); sendCmd(); return; }
+  if (k === 'enter' && meta.acceptLatest()) { e.preventDefault(); return; }     // Enter accepts Meta's preview
   if (k === '/' && voice.on) { e.preventDefault(); voice.stop(); return; }
   if (k === '/') { e.preventDefault(); openCmd(); }
   else if (k === 'p') setTool('pen');
@@ -569,11 +692,22 @@ addEventListener('keydown', e => {
 });
 
 // ---- voice ------------------------------------------------------------------------------------
-// The mic is a plain on/off switch, like dictation: on, words go into the bar; off (tap, "/" or Enter), it stops.
+// Two buttons: "Ask Meta" opens the command bar; the mic is its own plain on/off switch. Mic on: words go
+// into the bar as you speak. Mic off: tap it again (or "/" / Enter); it also turns off after 10 s of quiet.
 const mic = $('#mic'), micLabel = $('#mic .label'), wakeBtn = $('#wake');
-const vState = $('#cmd .vstate'), vEngine = $('#cmd .vengine'), vNote = $('#cmd .vnote');
+const ask = $('#ask'), askLabel = $('#ask .label');
+function askIdle() { return voice.wake ? 'Say “Hey Meta”' : 'Ask Meta'; }
+let micTimer = null, micSince = 0;
+function micClock(on) {
+  clearInterval(micTimer);
+  if (!on) return;
+  micSince = Date.now();
+  const tick = () => { const s = Math.floor((Date.now() - micSince) / 1000); micLabel.textContent = `Mic on · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  tick(); micTimer = setInterval(tick, 500);
+}
+const vState = $('#cmd .vstate'), vEngine = $('#cmd .vengine'), vNote = $('#cmd .vnote'), vLog = $('#cmd .vlog');
 function voiceNote(msg, bad = false) { vNote.textContent = msg; vNote.hidden = !msg; vNote.classList.toggle('bad', bad); }
-function idleLabel() { return voice.wake ? 'Say “Hey Meta”' : 'Mic off'; }
+function idleLabel() { return 'Mic off'; }
 function showEngine() {
   vEngine.hidden = !voice.canChoose;
   vEngine.textContent = voice.engine === 'browser' ? 'Use Meta transcription' : 'Use browser speech';
@@ -584,24 +718,33 @@ const voice = new Voice({
   onState: (s, detail) => {
     mic.dataset.state = s === 'on' ? 'listening' : s === 'transcribing' ? 'transcribing' : 'idle';
     mic.setAttribute('aria-pressed', s === 'on');
-    micLabel.textContent = s === 'on' ? 'Mic on · tap to stop' : s === 'transcribing' ? 'Transcribing…' : idleLabel();
-    vState.textContent = s === 'on' ? (voice.engine === 'browser' ? '● Listening: words appear as you speak' : '● Recording: Meta writes the words when you stop')
+    micClock(s === 'on');
+    if (s !== 'on') micLabel.textContent = s === 'transcribing' ? 'Transcribing…' : idleLabel();
+    vState.textContent = s === 'on' ? ((voice.engine === 'browser' || /live/.test(detail)) ? '● Mic on: words appear as you speak · tap Mic to stop' : '● Mic on: Meta writes the words when you stop')
       : s === 'transcribing' ? 'Meta is transcribing…' : `Mic off · ${voice.engineName}`;
     vState.classList.toggle('live', s === 'on');
     showEngine();
     if (s === 'on') { voiceNote(''); openCmd('', { focus: false }); }
   },
   onError: msg => { voiceNote(msg, !/^Mic turned off|^Two minutes/.test(msg)); openCmd('', { focus: false }); toast(msg); },
+  onLog: line => { vLog.textContent = line; },
   onWake: on => showWake(on),                       // voice turned wake mode off by itself
 });
 vEngine.onclick = () => { voice.setEngine(voice.engine === 'browser' ? 'meta' : 'browser'); voiceNote(`Voice now uses ${voice.engineName}.`); };
 function showWake(on) {
   wakeBtn.setAttribute('aria-pressed', on);
-  mic.classList.toggle('armed', on);
-  micLabel.textContent = idleLabel();
+  ask.classList.toggle('armed', on);
+  askLabel.textContent = askIdle();
 }
-mic.onclick = () => voice.toggle();
-showEngine(); micLabel.textContent = idleLabel(); vState.textContent = `Mic off · ${voice.engineName}`;
+// pointerup, not click: on iPad a click can be swallowed by the page's pen handling, which left the mic stuck on.
+let micDown = false;
+mic.addEventListener('pointerdown', e => { e.stopPropagation(); micDown = true; });
+mic.addEventListener('pointerup', e => { e.stopPropagation(); if (!micDown) return; micDown = false; voice.toggle(); });
+mic.addEventListener('pointercancel', () => { micDown = false; });
+mic.addEventListener('click', e => { if (e.detail === 0) voice.toggle(); });   // keyboard (Enter/Space on the button)
+ask.onclick = () => (cmd.hidden ? openCmd() : closeCmd());
+showMetaInk();
+showEngine(); micLabel.textContent = idleLabel(); askLabel.textContent = askIdle(); vState.textContent = `Mic off · ${voice.engineName}`;
 wakeBtn.onclick = () => showWake(voice.setWake(!voice.wake));
 
 // ---- demo ----------------------------------------------------------------------------------------
@@ -629,7 +772,7 @@ async function demo() {
 fetch('/api/health').then(r => r.json()).then(h => {
   $('#status').textContent = h.offline ? 'Meta: offline mode (reads typed lines only)' : `Meta: online · ${h.model || ''}`;
   $('#status').dataset.ok = !h.offline;
-  voice.serverOk = !h.offline;
+  voice.serverOk = !h.offline; voice.realtime = !!h.realtime && !!window.WebSocket;
 }).catch(() => { $('#status').textContent = 'Meta: server not reachable'; });
 
 // ---- offline app shell ---------------------------------------------------------------------------

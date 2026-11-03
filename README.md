@@ -41,6 +41,10 @@ pen strokes / typed lines ──► Muse Spark 1.3 reads the page into math line
 
 - Meta models: **Muse Spark 1.3** (page reading, intent, hint wording), **Muse Voice Transcribe**
   (voice commands when browser Web Speech is missing or fails).
+- Live voice over WebSockets: the page streams the mic to `/ws/voice`, which relays it to Meta's realtime
+  transcription (`wss://api.meta.ai/v1/asr/realtime`, key kept on the server) and sends the words back as
+  you speak. Works where the server keeps sockets open (`start.sh`, Docker, Hugging Face Spaces, Render).
+  Vercel functions can't, so there the page records a clip and sends it to `/api/transcribe` instead.
 - API contract between page and server: [docs/CONTRACT.md](docs/CONTRACT.md).
 - Optional decision router (Muse Glimmer, off by default): one short JSON call picks the tool and
   hint level, with Spark as the fallback. Data builder, eval and fine-tuning: [docs/ROUTER.md](docs/ROUTER.md).
@@ -62,6 +66,49 @@ cp .env.example .env        # put your MODEL_API_KEY from https://dev.meta.ai in
 
 Without `MODEL_API_KEY` it runs in **offline mode**: typed lines (T tool) are checked and hints
 come from rules; handwriting can only be read with the key.
+
+## Use Margin from other agent apps (MCP server)
+
+`server/mcp_server.py` makes Margin's tools available over the Model Context Protocol, so Claude Desktop,
+Claude Code, Cursor or any MCP client can check calculus working with the same SymPy referee.
+
+| Tool | What it returns | Needs the key? |
+|------|-----------------|----------------|
+| `check_steps` | status of every line, the first wrong line and a note on the mistake | no |
+| `give_hint` | a hint on the first wrong line (levels 1-2 never reveal the answer) | no (Spark words it when set) |
+| `next_step` | one next step, checked by SymPy before it is returned | no |
+| `explain_rule` | why the step works: rule, formula, how it applies | no (Spark words it when set) |
+| `finish_answer` | the remaining verified steps and the answer | no |
+| `typeset_lines` | each line as neat text and LaTeX | no |
+| `sketch_graph` | graph points for the function (and the antiderivative) | no |
+| `differentiate_check` | differentiates an antiderivative to check it | no |
+| `read_handwriting` | the lines read from a photo of a page (Muse Spark vision) | yes |
+| `ask_margin` | Margin's own Muse Spark agent chains the tools for a request like "help me" | yes (keywords without it) |
+
+Lines are a list of strings, one step each, e.g. `["∫ 2x cos(x^2) dx", "= sin(x^2) + C"]`.
+
+```bash
+.venv/bin/pip install -r requirements-mcp.txt
+.venv/bin/python -m server.mcp_server              # stdio
+.venv/bin/python -m server.mcp_server --http 8765  # streamable HTTP at http://127.0.0.1:8765/mcp
+```
+
+Claude Desktop (Settings → Developer → Edit Config), with your own path:
+
+```json
+{
+  "mcpServers": {
+    "margin": {
+      "command": "/path/to/METAhackathon/.venv/bin/python",
+      "args": ["-m", "server.mcp_server"],
+      "cwd": "/path/to/METAhackathon"
+    }
+  }
+}
+```
+
+Claude Code: `claude mcp add margin -- /path/to/METAhackathon/.venv/bin/python -m server.mcp_server`
+(run it from the repo folder). The key is read from `.env` as for the notebook.
 
 ## Put it online (free https, needed for voice on iPad)
 
