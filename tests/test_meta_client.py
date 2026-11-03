@@ -132,7 +132,7 @@ def test_transcribe_respects_rate_limiter_and_circuit_breaker(monkeypatch):
     monkeypatch.setenv("META_RATE_LIMIT_PERIOD", "60")
 
     calls = []
-    monkeypatch.setattr(meta_client, "_asr_post", lambda b: calls.append(b) or {"transcript": "integrate x squared"})
+    monkeypatch.setattr(meta_client, "_asr_post", lambda b, mode="PUSH_TO_TALK": calls.append(b) or {"transcript": "integrate x squared"})
 
     assert meta_client.transcribe(WAV) == "integrate x squared"
     assert len(calls) == 1
@@ -156,7 +156,7 @@ def test_transcribe_needs_wav_and_reports_meta_errors(monkeypatch):
     with pytest.raises(ValueError, match="WAV"):
         meta_client.transcribe(b"\x1aE\xdf\xa3webm-bytes")
 
-    def reject(_):
+    def reject(_, mode="PUSH_TO_TALK"):
         raise meta_client.TranscribeError("Meta voice error 400: unsupported WAV")
     monkeypatch.setattr(meta_client, "_asr_post", reject)
     with pytest.raises(meta_client.TranscribeError, match="400"):
@@ -276,3 +276,21 @@ def test_asr_retries_without_keywords_when_refused(monkeypatch):
     monkeypatch.setattr(httpx, "post", fake_post)
     assert meta_client._asr_post(WAV)["transcript"] == "check my work"
     assert "keywords" in sent[0] and "keywords" not in sent[1]
+
+
+def test_empty_push_to_talk_retries_with_endpointing(monkeypatch):
+    monkeypatch.setenv("MODEL_API_KEY", "test-key")
+    meta_client.rate_limiter.reset()
+    meta_client.circuit_breaker.reset()
+    modes = []
+
+    def asr(_, mode="PUSH_TO_TALK"):
+        modes.append(mode)
+        if mode == "PUSH_TO_TALK":
+            return {"sessionId": "s1", "transcript": "", "audioDurationMs": 3000, "turns": []}
+        return {"sessionId": "s2", "transcript": "", "audioDurationMs": 3000,
+                "turns": [{"turnId": 1, "transcript": "help me"}]}
+    monkeypatch.setattr(meta_client, "_asr_post", asr)
+    out = meta_client.transcribe_full(WAV)
+    assert modes == ["PUSH_TO_TALK", "ENDPOINTING"]
+    assert out == {"text": "help me", "session": "s2", "audio_ms": 3000}

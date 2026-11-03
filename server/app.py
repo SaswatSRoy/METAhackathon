@@ -345,7 +345,7 @@ def assist(
 
 
 @app.post("/api/transcribe")
-def transcribe(audio: UploadFile = File(...)) -> dict[str, str]:
+def transcribe(audio: UploadFile = File(...)) -> dict[str, Any]:
     # Plain def: the upstream call blocks, so FastAPI runs this in its threadpool.
     data = audio.file.read(meta_client.MAX_AUDIO_BYTES + 1)
     if not data:
@@ -353,7 +353,7 @@ def transcribe(audio: UploadFile = File(...)) -> dict[str, str]:
     if len(data) > meta_client.MAX_AUDIO_BYTES:
         raise HTTPException(status_code=413, detail="audio too large")
     try:
-        return {"text": meta_client.transcribe(data, audio.filename or "command.wav")}
+        return meta_client.transcribe_full(data, audio.filename or "command.wav")
     except ValueError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
     except meta_client.TranscribeError as exc:
