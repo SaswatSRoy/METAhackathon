@@ -40,6 +40,9 @@
     <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 15.5l-4.5-4.5-8 8"/></symbol>
     <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z"/><path d="M18.5 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></symbol>
     <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/></symbol>
+    <symbol id="i-suggest" viewBox="0 0 24 24"><path d="M12 4a5.5 5.5 0 0 0-3.2 10c.5.4.8 1 .8 1.6V17h4.8v-1.4c0-.6.3-1.2.8-1.6A5.5 5.5 0 0 0 12 4z"/><path d="M9.8 19.8h4.4"/></symbol>
+    <symbol id="i-wake" viewBox="0 0 24 24"><path d="M4.5 10.5v3"/><path d="M8.25 7.5v9"/><path d="M12 4.5v15"/><path d="M15.75 7.5v9"/><path d="M19.5 10.5v3"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5.5"/><path d="M6.5 11L12 5.5l5.5 5.5"/></symbol>
   </svg>
 
   <section id="shelf" class="shelf" hidden>
@@ -47,7 +50,7 @@
       <div class="brand big"><span class="mark-logo"></span><b>Margin</b></div>
       <div class="shelf-actions">
         <button id="account-btn" class="toggle" title="Cloud account &amp; PostgreSQL sync"><i></i><span id="account-label">Sign in</span></button>
-        <button id="new-notebook" class="pill-btn"><svg><use href="#i-plus"/></svg><span>New notebook</span></button>
+        <button id="new-notebook" class="pill-btn" aria-label="New notebook"><svg><use href="#i-plus"/></svg><span>New notebook</span></button>
       </div>
     </header>
     <h1>Notebooks</h1>
@@ -108,9 +111,8 @@
     </div>
 
     <div class="right">
-      <button id="auto" class="toggle" aria-pressed="true" aria-label="Suggestions" title="Suggest what Meta can do when I pause writing"><i></i><span>Suggestions</span><b class="short">Suggest</b></button>
-      <button id="meta-eye" class="toggle" aria-pressed="true" aria-label="Meta’s ink: shown" title="Show or hide Meta’s ink"><i></i><span>Meta’s ink</span><b class="short">Meta</b></button>
-      <button id="wake" class="toggle" aria-pressed="false" aria-label="Wake word" title="Listen for “Hey Meta”"><i></i><span>Wake word</span><b class="short">Wake</b></button>
+      <button id="auto" class="toggle" aria-pressed="true" aria-label="Suggestions" title="Suggest what Meta can do when I pause writing"><svg aria-hidden="true"><use href="#i-suggest"/></svg><i></i><span>Suggestions</span></button>
+      <button id="wake" class="toggle" aria-pressed="false" aria-label="Wake word" title="Listen for “Hey Meta”"><svg aria-hidden="true"><use href="#i-wake"/></svg><i></i><span>Wake word</span></button>
       <div class="menu-wrap">
         <button id="more" class="icon" title="More" aria-haspopup="true" aria-expanded="false"><svg><use href="#i-more"/></svg></button>
         <div id="menu" class="menu" hidden>
@@ -170,7 +172,10 @@
     </main>
   </div>
 
-  <div id="coach" class="coach">Write with the pen, or press <kbd>T</kbd> to type a line. Then press <kbd>/</kbd> or tap <b>Hey Meta</b>.</div>
+  <div id="coach" class="coach">
+    <span class="for-keys">Write with the pen, or press <kbd>T</kbd> to type a line. Then press <kbd>/</kbd> or tap the mic.</span>
+    <span class="for-touch">Write with the pen, or pick the <b>T</b> tool to type a line. Then tap the mic button to ask Meta.</span>
+  </div>
 
   <div id="trace" class="trace" hidden aria-live="polite"></div>
   <input id="pick-image" type="file" accept="image/*" hidden>
@@ -188,8 +193,8 @@
   <div id="cmd" class="cmd" hidden>
     <form>
       <span class="orb small"></span>
-      <input type="text" placeholder="Ask Meta… e.g. “help me with this integral”" autocomplete="off" spellcheck="false" aria-label="Command for Meta">
-      <kbd>↵</kbd>
+      <input type="text" placeholder="Ask Meta… e.g. “help me with this integral”" autocomplete="off" spellcheck="false" enterkeyhint="send" aria-label="Command for Meta">
+      <button type="submit" class="send" aria-label="Send to Meta"><kbd>↵</kbd><svg aria-hidden="true"><use href="#i-send"/></svg></button>
     </form>
     <div class="vbar"><span class="vstate">Mic off</span><button type="button" class="vengine" hidden>Use Meta transcription</button></div>
     <div class="vnote" role="status" aria-live="polite" hidden></div>

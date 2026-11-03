@@ -303,30 +303,16 @@ export class MetaInk {
     }
     this.syncPills();
   }
-
-  // ---- baking: a finished mark becomes notebook items -------------------------------------
-  // A mark of plain pen strokes (words, maths, ticks, circles, arrows, plain graphs) becomes ONE 'ink'
-  // item holding every pen stroke as a seg, from the engine's point lists (the eraser still takes them
-  // one by one). Anything else (shaded or dashed graphs, the font fallback) becomes one 'mark' item
-  // holding its markup. Not undoable by itself: callers checkpoint.
-  bake(m, extra = {}) {
-    const color = this.color(), grp = `g${Date.now().toString(36)}${++this.n}`;
-    const paths = [...m.g.querySelectorAll('path.ink-stroke')];
-    const plain = paths.length && !m.g.querySelector('text, path.shade, [stroke-dasharray]') && paths.every(p => p._polys?.length);
-    const base = { by: 'meta', mk: m.kind, grp, ...(m.rid ? { rid: m.rid } : {}), ...extra };
-    let items;
-    if (plain) {
-      const segs = paths.flatMap(p => {
-        const op = p.getAttribute('opacity'), w = +p.getAttribute('stroke-width') || 2.4;
-        return p._polys.filter(poly => poly.length).map(poly => ({ p: poly.map(([x, y]) => [x, y]), w, ...(op != null ? { o: +op } : {}) }));
-      });
-      items = segs.length ? [{ type: 'ink', ...base, color, segs }] : [];
-    } else {
-      const html = cleanMarkup(m.g);
-      const bs = [...m.boxes, ...(m.pts.length > 1 ? [ptsBox(m.pts)] : [])];
-      if (!bs.length) { m.g.remove(); this.live = this.live.filter(x => x !== m); return []; }
-      const polys = paths.flatMap(p => p._polys || []).map(poly => poly.map(([x, y]) => [r1(x), r1(y)]));
-      items = [{ type: 'mark', ...base, html, box0: unionBox(bs), x: 0, y: 0, color, polys: polys.length ? polys : polysFromHtml(html) }];
+  makeTappable(m) {
+    if (!this.onNoteTap || m.g.classList.contains('tap-target')) return;
+    m.g.classList.add('tap-target');
+    m.g.setAttribute('role', 'button');
+    m.g.setAttribute('tabindex', '0');
+    m.g.setAttribute('aria-label', `Meta’s hint: ${m.note.text}. Press for a more specific hint.`);
+    m.g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); this.onNoteTap(m.note); } });
+    if (!m.g.querySelector('rect.hit') && m.boxes.length) {
+      const pad = 6, xs = m.boxes.map(q => q[0]), ys = m.boxes.map(q => q[1]);
+      svgEl('rect', { class: 'hit', x: Math.min(...xs) - pad, y: Math.min(...ys) - pad, width: Math.max(...m.boxes.map(q => q[0] + q[2])) - Math.min(...xs) + 2 * pad, height: Math.max(...m.boxes.map(q => q[1] + q[3])) - Math.min(...ys) + 2 * pad, rx: 8 }, m.g);
     }
     if (!items.length) { m.g.remove(); this.live = this.live.filter(x => x !== m); return []; }
     const say = markText(m.g);
@@ -590,7 +576,8 @@ export class MetaInk {
 
     const anns = [...(resp.annotations || [])].map(a => (a.kind === 'explain' ? { ...a, kind: 'note' } : a));
     const ticked = new Set(anns.filter(a => a.kind === 'tick').map(a => a.target));
-    for (const l of resp.lines || []) if (l.status === 'ok' && !ticked.has(l.id)) anns.push({ kind: 'tick', target: l.id });
+    // A tidy-up or a graph is not a marking: ticking only the right lines would hide the wrong one.
+    if (!extrasOnly) for (const l of resp.lines || []) if (l.status === 'ok' && !ticked.has(l.id)) anns.push({ kind: 'tick', target: l.id });
     const order = { tick: 0, circle: 1, underline: 2, note: 3, ghost: 4, write: 5, typeset: 6, graph: 7 };
     const todo = anns.filter(a => a.kind in order).sort((a, b) => order[a.kind] - order[b.kind]);
     if (!todo.length && resp.verdict) todo.push({ kind: 'note', target: null, text: resp.verdict });
