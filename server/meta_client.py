@@ -562,15 +562,22 @@ def _asr_post(audio_bytes: bytes) -> dict[str, Any]:
     """POST /asr/transcribe: multipart with a JSON `request` part and a WAV `audio` part."""
     import httpx
 
-    settings = {"model": VOICE_MODEL, "audioEncoding": "WAV", "mode": "PUSH_TO_TALK",
-                "keywords": VOICE_KEYWORDS, "languageBias": ["English"]}
-    resp = httpx.post(
-        base_url().rstrip("/") + "/asr/transcribe",
-        headers={"Authorization": f"Bearer {api_key()}", "Accept": "application/json"},
-        files={"request": (None, json.dumps(settings), "application/json"),
-               "audio": ("command.wav", audio_bytes, "audio/wav")},
-        timeout=30.0,
-    )
+    basic = {"model": VOICE_MODEL, "audioEncoding": "WAV", "mode": "PUSH_TO_TALK"}
+
+    def post(settings: dict[str, Any]):
+        return httpx.post(
+            base_url().rstrip("/") + "/asr/transcribe",
+            headers={"Authorization": f"Bearer {api_key()}", "Accept": "application/json"},
+            files={"request": (None, json.dumps(settings), "application/json"),
+                   "audio": ("command.wav", audio_bytes, "audio/wav")},
+            timeout=30.0,
+        )
+
+    resp = post({**basic, "keywords": VOICE_KEYWORDS, "languageBias": ["English"]})
+    if resp.status_code in (400, 422):
+        # The optional biasing fields are the likeliest thing to be refused: try once with the bare request.
+        log.warning("Meta transcription HTTP %s with keywords; retrying without them", resp.status_code)
+        resp = post(basic)
     if resp.status_code != 200:
         try:
             err = resp.json()

@@ -8,7 +8,7 @@
 // "Hey Meta" wake mode (continuous listening for the wake word) uses the browser engine.
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const WAKE = /\b(?:hey|hi|hay|ok|okay),?\s*(?:meta|metta|matter|medha|mehta|meda)\b[\s,.!?]*/i;
-export const SILENCE_MS = 60000;                     // turn off after a minute with no speech
+export const SILENCE_MS = 10000;                     // turn off after 10 s with no speech
 const META_MAX_MS = 120000;                          // 2 min of 16 kHz WAV is ~3.8 MB, under Vercel's 4.5 MB body limit
 const WAV_RATE = 16000;
 const ENGINE_KEY = 'margin.voiceEngine';
@@ -70,6 +70,7 @@ export class Voice {
     if (remember) try { localStorage.setItem(ENGINE_KEY, e); } catch { /* private mode */ }
     this.state(this.on ? 'on' : 'off');
   }
+  log(msg) { this.trail = [...(this.trail || []).slice(-3), msg]; this.h.onLog?.(`${this.engine === 'browser' ? 'browser speech' : 'Meta'}: ${this.trail.join(' → ')}`); }
   state(s, detail = '') { this.h.onState?.(s, detail || this.engineName); }
   fail(msg) { console.warn('[margin] voice:', msg); this.h.onError?.(msg); }
 
@@ -83,15 +84,19 @@ export class Voice {
     this.on = true;
     this.lastSpeech = Date.now();
     clearInterval(this.watch);
-    this.watch = setInterval(() => { if (this.on && Date.now() - this.lastSpeech > SILENCE_MS) { this.stop(); this.h.onError?.('Mic turned off after a minute of silence.'); } }, 1000);
+    this.watch = setInterval(() => { if (this.on && Date.now() - this.lastSpeech > SILENCE_MS) { this.stop(); this.h.onError?.('Mic turned off after 10 seconds of silence.'); } }, 1000);
     if (this.engine === 'browser') this.startBrowser(); else this.startMeta();
   }
   stop() {
     if (!this.on) return;
     this.on = false;
     clearInterval(this.watch);
+    this.log('mic off');
     if (this.recording?.state === 'recording') { this.recording.stop(); return; }   // onstop transcribes
-    const r = this.rec; this.rec = null; try { r?.stop(); } catch { /* not started */ }
+    const r = this.rec; this.rec = null;
+    try { r?.stop(); } catch { /* not started */ }
+    // Safari sometimes never ends a stopped session (the mic stays live): force it after a moment.
+    if (r) setTimeout(() => { try { r.abort(); } catch { /* already ended */ } }, 1200);
     this.state('off');
   }
 
@@ -103,6 +108,8 @@ export class Voice {
       const rec = this.rec = new SR();
       rec.lang = navigator.language || 'en-US'; rec.continuous = true; rec.interimResults = true;
       let sessionFinal = '';
+      rec.onaudiostart = () => this.log('listening');
+      rec.onspeechstart = () => { this.lastSpeech = Date.now(); this.log('hearing speech'); };
       rec.onresult = e => {
         this.lastSpeech = Date.now();
         let interim = '';
@@ -114,7 +121,8 @@ export class Voice {
         this.h.onText?.(clean(this.prefix + this.finalText + sessionFinal + interim));
       };
       rec.onerror = e => {
-        if (e.error === 'aborted' || e.error === 'no-speech') return;    // silence: the minute timer decides
+        this.log(`error ${e.error}`);
+        if (e.error === 'aborted' || e.error === 'no-speech') return;    // silence: the 10 s timer decides
         if (SWITCH_ERRORS.has(e.error) && window.MediaRecorder) {
           this.on = false; this.rec = null;
           this.setEngine('meta', false);
@@ -178,12 +186,14 @@ export class Voice {
         let wav;
         try { wav = await toWav(blob); }
         catch { throw new Error(`This browser’s recording (${blob.type || 'unknown type'}) couldn’t be converted to WAV for Meta.`); }
+        this.log(`sending ${Math.round(wav.size / 1024)} KB WAV`);
         const fd = new FormData(); fd.append('audio', wav, 'command.wav');
         const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
         if (!r.ok) {
           const detail = await r.json().then(j => j.detail, () => '');
           throw new Error(`Meta voice failed (HTTP ${r.status}): ${detail || UPLOAD_ERRORS[r.status] || 'server error'}`);
         }
+        this.log('Meta replied');
         const text = clean(this.prefix + ((await r.json()).text || ''));
         if (text) this.h.onText?.(text); else throw new Error('Meta heard no words. Try again, a little closer to the mic.');
       } catch (err) {
@@ -191,6 +201,7 @@ export class Voice {
       } finally { this.state('off'); }
     };
     rec.start(250);
+    this.log(`recording (${rec.mimeType || 'default format'})`);
   }
 
   // Keep the one-minute silence timer fed while the student talks (Meta engine has no live words).

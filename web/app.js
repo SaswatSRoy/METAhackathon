@@ -413,7 +413,7 @@ more.onclick = e => { e.stopPropagation(); setMenu(menu.hidden); };
 document.addEventListener('pointerdown', e => {
   if (!e.target.closest('.menu-wrap')) setMenu(false);
   if (!e.target.closest('.img-wrap')) setImgMenu(false);
-  if (!e.target.closest('#cmd, #mic') && !voice.on && $('#mic').dataset.state !== 'transcribing') closeCmd();
+  if (!e.target.closest('#cmd, #mic, #ask') && !voice.on && $('#mic').dataset.state !== 'transcribing') closeCmd();
 });
 menu.onclick = e => {
   const act = e.target.closest('[data-act]')?.dataset.act;
@@ -596,9 +596,9 @@ function showTrace(trace) {
 // on: true while Meta reads the page, 'writing' while it writes (tap the page to skip), false when done.
 function showReading(on) {
   const r = $('#reading');
-  $('#mic').classList.toggle('thinking', !!on);
+  ask.classList.toggle('thinking', !!on);
   r.querySelector('span').textContent = on === 'writing' ? 'Meta is writing… tap to skip' : 'Meta is reading your page…';
-  if (!voice.on) micLabel.textContent = on === 'writing' ? 'Meta is writing…' : on ? 'Meta is reading…' : idleLabel();
+  askLabel.textContent = on === 'writing' ? 'Meta is writing…' : on ? 'Meta is reading…' : askIdle();
   if (!on) { r.hidden = true; return; }
   if (on === 'writing') { r.classList.add('writing'); return; }     // stays where it was, by the pen
   r.classList.remove('writing');
@@ -687,11 +687,22 @@ addEventListener('keydown', e => {
 });
 
 // ---- voice ------------------------------------------------------------------------------------
-// The mic is a plain on/off switch, like dictation: on, words go into the bar; off (tap, "/" or Enter), it stops.
+// Two buttons: "Ask Meta" opens the command bar; the mic is its own plain on/off switch. Mic on: words go
+// into the bar as you speak. Mic off: tap it again (or "/" / Enter); it also turns off after 10 s of quiet.
 const mic = $('#mic'), micLabel = $('#mic .label'), wakeBtn = $('#wake');
-const vState = $('#cmd .vstate'), vEngine = $('#cmd .vengine'), vNote = $('#cmd .vnote');
+const ask = $('#ask'), askLabel = $('#ask .label');
+function askIdle() { return voice.wake ? 'Say “Hey Meta”' : 'Ask Meta'; }
+let micTimer = null, micSince = 0;
+function micClock(on) {
+  clearInterval(micTimer);
+  if (!on) return;
+  micSince = Date.now();
+  const tick = () => { const s = Math.floor((Date.now() - micSince) / 1000); micLabel.textContent = `Mic on · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  tick(); micTimer = setInterval(tick, 500);
+}
+const vState = $('#cmd .vstate'), vEngine = $('#cmd .vengine'), vNote = $('#cmd .vnote'), vLog = $('#cmd .vlog');
 function voiceNote(msg, bad = false) { vNote.textContent = msg; vNote.hidden = !msg; vNote.classList.toggle('bad', bad); }
-function idleLabel() { return voice.wake ? 'Say “Hey Meta”' : 'Mic off'; }
+function idleLabel() { return 'Mic off'; }
 function showEngine() {
   vEngine.hidden = !voice.canChoose;
   vEngine.textContent = voice.engine === 'browser' ? 'Use Meta transcription' : 'Use browser speech';
@@ -702,25 +713,33 @@ const voice = new Voice({
   onState: (s, detail) => {
     mic.dataset.state = s === 'on' ? 'listening' : s === 'transcribing' ? 'transcribing' : 'idle';
     mic.setAttribute('aria-pressed', s === 'on');
-    micLabel.textContent = s === 'on' ? 'Mic on · tap to stop' : s === 'transcribing' ? 'Transcribing…' : idleLabel();
-    vState.textContent = s === 'on' ? (voice.engine === 'browser' ? '● Listening: words appear as you speak' : '● Recording: Meta writes the words when you stop')
+    micClock(s === 'on');
+    if (s !== 'on') micLabel.textContent = s === 'transcribing' ? 'Transcribing…' : idleLabel();
+    vState.textContent = s === 'on' ? (voice.engine === 'browser' ? '● Mic on: words appear as you speak · tap Mic to stop' : '● Mic on: Meta writes the words when you stop')
       : s === 'transcribing' ? 'Meta is transcribing…' : `Mic off · ${voice.engineName}`;
     vState.classList.toggle('live', s === 'on');
     showEngine();
     if (s === 'on') { voiceNote(''); openCmd('', { focus: false }); }
   },
   onError: msg => { voiceNote(msg, !/^Mic turned off|^Two minutes/.test(msg)); openCmd('', { focus: false }); toast(msg); },
+  onLog: line => { vLog.textContent = line; },
   onWake: on => showWake(on),                       // voice turned wake mode off by itself
 });
 vEngine.onclick = () => { voice.setEngine(voice.engine === 'browser' ? 'meta' : 'browser'); voiceNote(`Voice now uses ${voice.engineName}.`); };
 function showWake(on) {
   wakeBtn.setAttribute('aria-pressed', on);
-  mic.classList.toggle('armed', on);
-  micLabel.textContent = idleLabel();
+  ask.classList.toggle('armed', on);
+  askLabel.textContent = askIdle();
 }
-mic.onclick = () => voice.toggle();
+// pointerup, not click: on iPad a click can be swallowed by the page's pen handling, which left the mic stuck on.
+let micDown = false;
+mic.addEventListener('pointerdown', e => { e.stopPropagation(); micDown = true; });
+mic.addEventListener('pointerup', e => { e.stopPropagation(); if (!micDown) return; micDown = false; voice.toggle(); });
+mic.addEventListener('pointercancel', () => { micDown = false; });
+mic.addEventListener('click', e => { if (e.detail === 0) voice.toggle(); });   // keyboard (Enter/Space on the button)
+ask.onclick = () => (cmd.hidden ? openCmd() : closeCmd());
 showMetaInk();
-showEngine(); micLabel.textContent = idleLabel(); vState.textContent = `Mic off · ${voice.engineName}`;
+showEngine(); micLabel.textContent = idleLabel(); askLabel.textContent = askIdle(); vState.textContent = `Mic off · ${voice.engineName}`;
 wakeBtn.onclick = () => showWake(voice.setWake(!voice.wake));
 
 // ---- demo ----------------------------------------------------------------------------------------

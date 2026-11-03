@@ -259,3 +259,20 @@ def test_security_sympy_guard_keeps_ordinary_math():
                  "∫_0^1 x^2 dx = 1/3", "[x^3/3]_0^2", "d/dx (x^2+1)^5"):
         assert parse_line(text).ok, text
 
+
+
+def test_asr_retries_without_keywords_when_refused(monkeypatch):
+    import httpx
+    import json as _json
+    sent = []
+
+    def fake_post(url, headers, files, timeout):
+        req = _json.loads(files["request"][1])
+        sent.append(req)
+        if "keywords" in req:
+            return httpx.Response(400, json={"error": {"type": "invalid_request_error", "message": "unknown field keywords"}})
+        return httpx.Response(200, json={"transcript": "check my work", "turns": []})
+    monkeypatch.setenv("MODEL_API_KEY", "test-key")
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert meta_client._asr_post(WAV)["transcript"] == "check my work"
+    assert "keywords" in sent[0] and "keywords" not in sent[1]
