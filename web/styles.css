@@ -219,13 +219,12 @@ kbd {
 .coach.gone { opacity: 0; transform: translateY(8px); pointer-events: none; }
 
 .cmd {
-  position: fixed; left: 50%; bottom: calc(26px + env(safe-area-inset-bottom)); z-index: 40; width: min(600px, calc(100vw - 32px));
+  position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom)); z-index: 40; width: min(600px, calc(100vw - 32px));   /* sits above the dock (20px up, buttons up to 52px tall), so the mic stays tappable */
   padding: 8px; border-radius: 18px; background: rgba(255,255,255,.95); border: 1px solid var(--hair);
   box-shadow: 0 24px 60px -18px rgba(40,30,10,.45); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
   transform: translate(-50%, 12px) scale(.98); opacity: 0; transition: transform .18s ease-out, opacity .18s;
 }
 .cmd.open { transform: translate(-50%, 0); opacity: 1; }
-@media (max-width: 1100px) { .cmd { bottom: calc(78px + env(safe-area-inset-bottom)); } }   /* narrower, the bar reaches the mic: sit above it so dictation can still be turned off */
 .cmd form { display: flex; align-items: center; gap: 10px; padding: 4px 8px 8px; }
 .cmd input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; font: 16px Inter, system-ui, sans-serif; color: var(--ui); -webkit-user-select: text; user-select: text; }
 .cmd .send { position: relative; flex: none; display: grid; place-items: center; border-radius: 6px; touch-action: manipulation; transition: transform .12s ease-out, opacity .15s; }
@@ -256,7 +255,7 @@ kbd {
   transform: translate(-50%, 10px); opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
-.toast button { color: #ffb199; font-weight: 600; }
+.toast button { flex: none; color: #ffb199; font-weight: 600; white-space: nowrap; }
 
 /* ---------- shelf (home) ---------- */
 .shelf {
@@ -380,6 +379,7 @@ body.on-shelf .dock, body.on-shelf .mic, body.on-shelf .coach, body.on-shelf .cm
   .coach { display: none; } .tools { gap: 4px; } .seg button { width: 34px; }
   .swatches, #toggle-pages, .toolbar .sizes { display: none; }
   .crumb b { max-width: 34vw; }
+  #meta-eye, #toolbar-account { display: none; }   /* both are in the ⋯ menu too: the notebook title needs the room */
   .pill-btn { width: 38px; padding: 0; justify-content: center; }
   .pill-btn span { display: none; }
   .shelf-grid { grid-template-columns: repeat(2, 1fr); gap: 24px 16px; }
