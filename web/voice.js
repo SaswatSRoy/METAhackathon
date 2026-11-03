@@ -27,6 +27,9 @@ const clean = t => stripWake(t.replace(/\s+/g, ' ')).replace(/^[,.!?\s]+/, '');
 
 // Muse Voice Transcribe takes only 16-bit mono PCM WAV at 16 or 24 kHz, and browsers record
 // webm/opus (Chrome) or mp4/aac (Safari). Decode the recording and write it out as WAV.
+// Speech is also trimmed (the 10 s of silence before the mic turns off is dropped) and brought up to a
+// clear level, since a quiet laptop mic can come back from Meta as "no words".
+export const QUIET_PEAK = 0.01;                      // below this the mic recorded silence
 export async function toWav(blob) {
   const AC = window.AudioContext || window.webkitAudioContext;
   const ctx = new AC();
@@ -35,19 +38,34 @@ export async function toWav(blob) {
     const buf = await new Promise((ok, bad) => { const p = ctx.decodeAudioData(bytes, ok, bad); p?.then?.(ok, bad); });
     const chans = [...Array(buf.numberOfChannels)].map((_, c) => buf.getChannelData(c));
     const step = buf.sampleRate / WAV_RATE, n = Math.floor(buf.length / step);
-    const out = new DataView(new ArrayBuffer(44 + n * 2));
-    const str = (o, t) => [...t].forEach((ch, i) => out.setUint8(o + i, ch.charCodeAt(0)));
-    str(0, 'RIFF'); out.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
-    out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
-    out.setUint32(24, WAV_RATE, true); out.setUint32(28, WAV_RATE * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
-    str(36, 'data'); out.setUint32(40, n * 2, true);
+    const mono = new Float32Array(n);
+    let peak = 0;
     for (let i = 0; i < n; i++) {                      // average each window: mono and anti-aliased
       const a = Math.floor(i * step), b = Math.max(a + 1, Math.floor((i + 1) * step));
       let sum = 0; for (const ch of chans) for (let j = a; j < b; j++) sum += ch[j] || 0;
-      const v = Math.max(-1, Math.min(1, sum / ((b - a) * chans.length)));
+      const v = sum / ((b - a) * chans.length);
+      mono[i] = v; if (Math.abs(v) > peak) peak = Math.abs(v);
+    }
+    // Trim to the loud part, keeping 0.4 s either side so first and last words aren't clipped.
+    const gate = Math.max(peak * 0.08, 0.003), pad = Math.round(WAV_RATE * 0.4);
+    let first = 0, last = n - 1;
+    while (first < n && Math.abs(mono[first]) < gate) first++;
+    while (last > first && Math.abs(mono[last]) < gate) last--;
+    const from = Math.max(0, first - pad), to = Math.min(n, last + pad + 1), len = Math.max(0, to - from);
+    const gain = peak > 0 ? Math.min(0.9 / peak, 30) : 1;   // up to 30x for a quiet mic
+    const out = new DataView(new ArrayBuffer(44 + len * 2));
+    const str = (o, t) => [...t].forEach((ch, i) => out.setUint8(o + i, ch.charCodeAt(0)));
+    str(0, 'RIFF'); out.setUint32(4, 36 + len * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+    out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, 1, true);
+    out.setUint32(24, WAV_RATE, true); out.setUint32(28, WAV_RATE * 2, true); out.setUint16(32, 2, true); out.setUint16(34, 16, true);
+    str(36, 'data'); out.setUint32(40, len * 2, true);
+    for (let i = 0; i < len; i++) {
+      const v = Math.max(-1, Math.min(1, mono[from + i] * gain));
       out.setInt16(44 + i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
     }
-    return new Blob([out.buffer], { type: 'audio/wav' });
+    const wav = new Blob([out.buffer], { type: 'audio/wav' });
+    wav.peak = peak; wav.seconds = len / WAV_RATE; wav.recorded = n / WAV_RATE;
+    return wav;
   } finally { ctx.close?.(); }
 }
 
@@ -166,7 +184,7 @@ export class Voice {
       return;
     }
     let stream;
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true } }); }
     catch (err) { ctx?.close?.(); this.on = false; this.state('off'); this.fail(`Microphone blocked (${err.name || 'error'}). Allow the mic for this site.`); return; }
     if (!this.on) { stream.getTracks().forEach(t => t.stop()); ctx?.close?.(); return; }   // turned off while asking
     const type = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'].find(t => MediaRecorder.isTypeSupported?.(t));
@@ -186,6 +204,9 @@ export class Voice {
         let wav;
         try { wav = await toWav(blob); }
         catch { throw new Error(`This browser’s recording (${blob.type || 'unknown type'}) couldn’t be converted to WAV for Meta.`); }
+        const level = Math.round(wav.peak * 100);
+        this.log(`mic level ${level}%, ${wav.seconds.toFixed(1)} s of sound`);
+        if (wav.peak < QUIET_PEAK) throw new Error(`The microphone recorded silence (level ${level}%). Check that the right mic is selected in your computer’s sound settings and in the browser’s site settings.`);
         this.log(`sending ${Math.round(wav.size / 1024)} KB WAV`);
         const fd = new FormData(); fd.append('audio', wav, 'command.wav');
         const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
@@ -193,9 +214,11 @@ export class Voice {
           const detail = await r.json().then(j => j.detail, () => '');
           throw new Error(`Meta voice failed (HTTP ${r.status}): ${detail || UPLOAD_ERRORS[r.status] || 'server error'}`);
         }
-        this.log('Meta replied');
-        const text = clean(this.prefix + ((await r.json()).text || ''));
-        if (text) this.h.onText?.(text); else throw new Error('Meta heard no words. Try again, a little closer to the mic.');
+        const body = await r.json();
+        this.log(`Meta replied${body.audio_ms != null ? ` (heard ${(body.audio_ms / 1000).toFixed(1)} s)` : ''}`);
+        const text = clean(this.prefix + (body.text || ''));
+        if (text) this.h.onText?.(text);
+        else throw new Error(`Meta got ${wav.seconds.toFixed(1)} s of audio (level ${level}%) but found no words${body.session ? ` (session ${body.session})` : ''}. ` + (SR ? 'Try Browser speech in the bar instead.' : 'Try again, speaking a little louder.'));
       } catch (err) {
         this.fail(err.message || String(err));
       } finally { this.state('off'); }
