@@ -3,6 +3,7 @@ import { Notebook, PAGE_W, PAGE_H, PEN_SIZES, rowY, RULE, isMeta } from './ink.j
 import { saveImage, savePdfPages, isPdf } from './images.js';
 import { MetaInk, assist, META_COLOR } from './assistant.js';
 import { setHandStyle } from './handwriting.js';
+import { refine } from './refine.js';
 import { Suggest } from './suggest.js';
 import { Voice } from './voice.js';
 import { store, authClient, newPage, createNotebook } from './store.js';
@@ -21,7 +22,7 @@ const page = $('#page'), desk = $('#desk'), sheet = $('#sheet');
 const nb = new Notebook({
   page, ink: $('#ink'), live: $('#live'), paper: $('#paper'), paintPaper, scroller: desk,
   onErase: (pt, R) => meta.erase(pt, R),
-  onChange: kind => { dismissCoach(); scheduleSave(); syncBg(); if (kind === 'stroke' || kind === 'text') scheduleAutoCheck(); },
+  onChange: kind => { dismissCoach(); scheduleSave(); syncBg(); if (kind === 'stroke' || kind === 'text') scheduleAutoCheck(); if (kind === 'stroke') scheduleAutoRefine(); },
   onSelect: box => showSelBar(box),
   onLongPress: it => pickMetaMark(it),
   beforeStroke: (s, { tap, ptype }) => {
@@ -362,9 +363,50 @@ selBar.onclick = e => {
   if (b.dataset.recolor) nb.recolorSelection(b.dataset.recolor, b.closest('.hl') != null);
   if (b.dataset.sel === 'delete') nb.deleteSelection();
   if (b.dataset.sel === 'adopt' && nb.adoptSelection()) toast('It’s yours now: Meta will read it as your work.', { label: 'Undo', fn: () => nb.undo() });
+  if (b.dataset.sel === 'refine') refineSelection();
   if (b.dataset.sel === 'convert') convertSelection();
   if (b.dataset.sel === 'more') { nb.clearSelection(); callMeta('more please, be more specific', 'hint', { escalate: true }); }
 };
+// ---- Refine handwriting (like Apple Notes' Refine): straighter rows, even letters and spacing, and a
+// letter Meta read for sure nudged towards a clean print letter. It stays the student's handwriting.
+const studentStrokes = items => items.filter(it => it.type === 'stroke' && !it.hl && !isMeta(it) && it.pts?.length > 1);
+function applyRefined(strokes, res) {
+  for (const s of strokes) { s.pts = res.pts.get(s).map(([x, y, p]) => [Math.round(x * 100) / 100, Math.round(y * 100) / 100, p]); nb.prepare(s); }
+  nb.redraw(); scheduleSave();
+}
+async function refineSelection() {
+  const strokes = studentStrokes(nb.sel);
+  if (!strokes.length) { toast('Select some handwriting first.'); return; }
+  toast('Refining your writing…');
+  let texts = null;
+  try {
+    const r = await fetch('/api/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: nb.snapshotOf(strokes) }) });
+    if (r.ok) texts = (await r.json()).lines || null;
+  } catch { /* offline: shape and spacing only */ }
+  if (!strokes.every(s => nb.items.includes(s))) return;      // erased meanwhile
+  nb.checkpoint();
+  const res = refine(strokes, { texts });
+  applyRefined(strokes, res);
+  nb.clearSelection();
+  toast(res.letters ? `Refined. ${res.letters} unclear letter${res.letters === 1 ? '' : 's'} neatened.` : 'Refined.', { label: 'Undo', fn: () => nb.undo() });
+}
+// While "Tidy my writing" is on: after a short pause, gently straighten and space the words just written.
+let autoRefineT = null, refinedSeen = new WeakSet();
+function scheduleAutoRefine() {
+  clearTimeout(autoRefineT);
+  if (!tidyOn) return;
+  autoRefineT = setTimeout(() => {
+    if (nb.active || nb.cur) return;
+    const fresh = studentStrokes(nb.items).filter(s => !refinedSeen.has(s) && !s.shaped);
+    fresh.forEach(s => refinedSeen.add(s));
+    if (fresh.length < 3) return;
+    const res = refine(fresh, { strength: 0.6 });
+    if (res.rows !== 1) return;
+    nb.checkpoint();
+    applyRefined(fresh, res);
+  }, 1600);
+}
+
 // Lasso › To text: Meta reads the selected handwriting and it becomes a typed text box in its place.
 async function convertSelection() {
   const strokes = nb.sel.filter(it => it.type === 'stroke' && !it.hl && !isMeta(it));
@@ -548,6 +590,17 @@ nb.onShape = kind => {
 let handPref = 'print';
 try { if (localStorage.getItem('margin.handStyle') === 'cursive') handPref = 'cursive'; } catch { /* private mode */ }
 setHandStyle(handPref);
+// Meta's writing size: S / M / L (a multiplier on "as big as the student's writing").
+let inkSize = 0.85;
+try { const v = parseFloat(localStorage.getItem('margin.inkSize')); if ([0.7, 0.85, 1].includes(v)) inkSize = v; } catch { /* private mode */ }
+meta.inkScale = inkSize;
+const syncSizeSeg = () => $$('[data-inksize]').forEach(b => b.setAttribute('aria-pressed', +b.dataset.inksize === inkSize));
+syncSizeSeg();
+$$('[data-inksize]').forEach(b => b.onclick = () => {
+  inkSize = +b.dataset.inksize; meta.inkScale = inkSize; syncSizeSeg();
+  try { localStorage.setItem('margin.inkSize', String(inkSize)); } catch { /* private mode */ }
+  toast({ 0.7: 'Meta now writes small.', 0.85: 'Meta now writes a bit smaller than you.', 1: 'Meta now writes as big as you.' }[inkSize]);
+});
 const syncHandSeg = () => $$('[data-hand]').forEach(b => b.setAttribute('aria-pressed', b.dataset.hand === handPref));
 syncHandSeg();
 $$('[data-hand]').forEach(b => b.onclick = () => {
@@ -599,6 +652,10 @@ page.addEventListener('pointerdown', dismissCoach, { once: true });
 
 // ---- calling Meta ------------------------------------------------------------------------
 let busy = false, hintMemo = null, lastReadLines = [];
+// Short-term memory: what Meta read from this page last time and the last few turns. A follow-up
+// ("why?", "more", "show working") reuses it instead of rescanning, until the student's writing changes.
+let readMemo = null;
+const memoFor = (pageId, sig) => readMemo && readMemo.page === pageId && readMemo.sig === sig ? readMemo : null;
 const touchOnly = () => matchMedia('(hover: none)').matches;
 
 function nextHintLevel(lines, sig, escalate) {
@@ -631,7 +688,10 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
     notebook_id: state.book?.id || null,
     page_id: pageId,
   };
-  if (!overrideLines && (nb.hasStrokes() || nb.hasImages())) { payload.image = nb.snapshot(); payload.ink_rows = nb.inkRows(); }
+  const memo = !overrideLines && !lines.length ? memoFor(pageId, sig) : null;
+  if (memo) {
+    payload.lines = memo.lines; payload.from_memory = true; payload.history = memo.history.slice(-4);
+  } else if (!overrideLines && (nb.hasStrokes() || nb.hasImages())) { payload.image = nb.snapshot(); payload.ink_rows = nb.inkRows(); }
 
   busy = true;
   showReading(true);
@@ -639,6 +699,11 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
     const resp = await assist(payload);
     if (current()?.id !== pageId) return;           // the student turned the page meanwhile
     lastReadLines = resp.lines?.length ? resp.lines : lines;
+    const did = (resp.agent_trace || []).filter(t => t.tool !== 'read_page' && t.tool !== 'memory').map(t => t.summary).join('; ').slice(0, 160);
+    if ((payload.image || memo) && resp.lines?.length) {
+      const keep = memo ? memo.lines : resp.lines.map(({ id, text, bbox }) => ({ id, text, bbox: bbox || null }));
+      readMemo = { page: pageId, sig, lines: keep, history: [...(memo?.history || []), { command: command || mode, did }].slice(-4) };
+    } else if (!memo) readMemo = null;
     showReading('writing');
     showTrace(resp.agent_trace);
     const wrong = resp.first_wrong && ((resp.lines || []).find(l => l.id === resp.first_wrong) || lines.find(l => l.id === resp.first_wrong));
@@ -674,6 +739,7 @@ function runQueued() {
 const plural = (n, w) => `${n} ${w}${n === '1' ? '' : 's'}`;
 const TRACE_WORDS = {
   read_page: () => 'read page',
+  memory: () => 'remembered page',
   check_steps: s => { const w = /(L\d+) wrong/.exec(s); return w ? `checked steps (${w[1]} wrong)` : 'checked steps'; },
   give_hint: () => 'wrote hint',
   finish_answer: s => { const n = /wrote (\d+)/.exec(s)?.[1]; return n ? `wrote ${plural(n, 'step')}` : 'wrote answer'; },
