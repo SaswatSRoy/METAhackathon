@@ -269,7 +269,7 @@ export function prepareItem(it) {
 
 // Plain JSON for storage: no Path2D, rounded coordinates.
 const r2 = v => Math.round(v * 100) / 100;
-const META_KEYS = ['by', 'mk', 'grp', 'say', 'note', 'kept', 'dim'];
+const META_KEYS = ['by', 'mk', 'grp', 'say', 'note', 'kept', 'dim', 'rid'];
 const withMeta = (s, it) => { for (const k of META_KEYS) if (it[k] != null && it[k] !== false) s[k] = it[k]; return s; };
 export function serializeItem(it) {
   if (it.type === 'stroke') {
@@ -454,12 +454,44 @@ export class Notebook {
     const gb = [Math.min(...xs) - 6, Math.min(...ys) - 6, Math.max(...xs) - Math.min(...xs) + 12, Math.max(...ys) - Math.min(...ys) + 12];
     const covered = ps => ps.some(([x, y]) => inBox(gb, x, y) && near(x, y));
     const before = this.snap();
-    const dirty = this.cut(it => (it.type === 'stroke' || it.type === 'mark') && overlap(it.bbox, gb) && covered(it.type === 'mark' ? (it.polys || []).flat().map(([x, y]) => [x + it.x, y + it.y]) : it.pts),
+    const typed = this.scratchText(gb);
+    const dirty = typed | this.cut(it => (it.type === 'stroke' || it.type === 'mark') && overlap(it.bbox, gb) && covered(it.type === 'mark' ? (it.polys || []).flat().map(([x, y]) => [x + it.x, y + it.y]) : it.pts),
       sg => overlap(segGeometry(sg)._box, gb) && covered(sg.p));
-    if (!dirty) return false;
+    if (!dirty) {                     // a zigzag over typed text that missed every word: drop it, no smudge
+      return this.items.some(it => it.type === 'textbox' && !it.editing && (it.rowBoxes || []).some(b => overlap(b, gb)));
+    }
     this.history.push(before); this.future = [];
     this.redraw(); this.notifySelect(); this.onChange?.('erase');
     return true;
+  }
+  // Scratch-out over typed text: the words whose middle the zigzag covers go (a box left empty goes too).
+  scratchText(gb) {
+    const cy = gb[1] + gb[3] / 2, x0 = gb[0] + 6, x1 = gb[0] + gb[2] - 6;
+    let dirty = false;
+    textFont();
+    for (const it of [...this.items]) {
+      if (it.type !== 'textbox' || it.editing || (this.metaHidden && isMeta(it)) || !overlap(it.bbox, gb)) continue;
+      const paras = String(it.text).split('\n').map(p => wrapRows(p, it.w));
+      let i = 0, hit = false;
+      for (const rows of paras) rows.forEach((row, j) => {
+        const base = rowBaseline(it, i++);
+        if (cy < base - 26 || cy > base + 10) return;
+        let x = it.x;
+        const kept = row.split(/(\s+)/).filter(w => {
+          const wx = x, ww = mctx.measureText(w).width; x += ww;
+          const gone = w.trim() && wx + ww / 2 >= x0 && wx + ww / 2 <= x1;
+          if (gone) hit = true;
+          return !gone;
+        });
+        rows[j] = kept.join('').replace(/\s+/g, ' ').trim();
+      });
+      if (!hit) continue;
+      dirty = true;
+      const text = paras.map(rows => rows.filter(Boolean).join(' ')).join('\n').replace(/^\n+|\n+$/g, '');
+      if (text.trim()) { it.text = text; prepareItem(it); }
+      else { this.items = this.items.filter(x => x !== it); this.sel = this.sel.filter(x => x !== it); }
+    }
+    return dirty;
   }
   cancelPress() { if (this.press) { clearTimeout(this.press.t); this.press = null; } }
   longPress(it) {

@@ -234,7 +234,7 @@ def _decimate_points(pts: list[Any], max_pts: int = MAX_POINTS_PER_STROKE) -> li
 
 
 # Meta's ink is stored as ordinary items tagged by="meta" (see web/ink.js): keep those tags.
-_META_TAGS = ("by", "mk", "grp", "say", "kept", "dim")
+_META_TAGS = ("by", "mk", "grp", "say", "kept", "dim", "rid")
 MAX_SEGS_PER_INK = 2000
 MAX_MARK_HTML = 200_000
 

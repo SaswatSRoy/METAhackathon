@@ -30,7 +30,7 @@ const nb = new Notebook({
     if (pv && tap && ptype === 'pen') { meta.decide(pv.pid, 'accept'); return true; }   // Pencil tap on the faint ink
     const old = tap && nb.metaAt(p0);
     if (old?.dim) {                                                          // tap a faded hint: bring it back
-      for (const it of nb.items) if (it.grp === old.grp) delete it.dim;
+      for (const it of hintGroup(old)) { delete it.dim; delete it.below; }
       nb.redraw(); scheduleSave(); return true;
     }
     return false;
@@ -41,14 +41,28 @@ const nb = new Notebook({
     if (!s.hl) fadeOldHints(s);
   },
 });
-// Old hints fade (to 40%) once the student has written two more strokes below them; a tap brings one back.
+// A hint's marks: its note and the circle / underline / arrow written by the same reply, so they fade
+// and come back together. Kept (moved, recoloured, accepted) ink never fades.
+const FADES = new Set(['note', 'circle', 'underline']);
+function hintGroup(it) {
+  const same = x => it.rid ? x.rid === it.rid : x.grp === it.grp;
+  return nb.items.filter(x => x.by === 'meta' && FADES.has(x.mk) && !x.kept && same(x));
+}
+// Old hints fade (to 40%) once the student has written two more strokes just under them (within
+// three rows below the hint, across its width); a tap brings one back.
 function fadeOldHints(s) {
-  const top = s.bbox[1];
-  for (const it of nb.items) {
-    if (it.by !== 'meta' || it.mk !== 'note' || it.kept || it.dim || top < it.bbox[1] + it.bbox[3]) continue;
-    it.below = (it.below || 0) + 1;
-    if (it.below >= 2) it.dim = true;
+  const [sx, top, sw] = s.bbox;
+  for (const note of nb.items.filter(it => it.by === 'meta' && it.mk === 'note' && !it.kept && !it.dim)) {
+    const g = hintGroup(note), [gx, gy, gw, gh] = unionRect(g.map(it => it.bbox));
+    const bottom = gy + gh;
+    if (top < bottom - 6 || top > bottom + 3 * RULE || sx + sw < gx - 40 || sx > gx + gw + 40) continue;
+    note.below = (note.below || 0) + 1;
+    if (note.below >= 2) for (const it of g) it.dim = true;
   }
+}
+function unionRect(bs) {
+  const x0 = Math.min(...bs.map(b => b[0])), y0 = Math.min(...bs.map(b => b[1]));
+  return [x0, y0, Math.max(...bs.map(b => b[0] + b[2])) - x0, Math.max(...bs.map(b => b[1] + b[3])) - y0];
 }
 // Meta's ink colour: one of a few pencils, or 'mine' (the student's pen colour at the time Meta writes).
 const META_INKS = { '#d0452b': 'Pencil red', '#5b6470': 'Graphite', '#b0337a': 'Magenta', mine: 'My pen colour' };
@@ -126,6 +140,18 @@ async function openNotebook(id, pageId) {
   const i = Math.max(0, pages.findIndex(p => p.id === pageId));
   await showPage(i, { force: true });
   sidebar.render(state.pages, state.idx);
+  firstRunTip();
+}
+
+// Once per browser, on a new notebook's empty first page, Meta writes how to use it in the margin.
+async function firstRunTip() {
+  try { if (localStorage.getItem('margin.tipShown')) return; } catch { return; }
+  if (state.idx !== 0 || nb.items.length || current()?.meta?.length) return;
+  try { localStorage.setItem('margin.tipShown', '1'); } catch { return; }
+  const pageId = current().id;
+  await sleep(500);
+  if (current()?.id !== pageId || nb.items.length) return;
+  if (await meta.writeTip() && current()?.id === pageId) saveNow();
 }
 
 async function showPage(i, { force = false } = {}) {
@@ -474,10 +500,10 @@ function nextHintLevel(lines, sig, escalate) {
 }
 
 let queued = null;
-async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null } = {}) {
+async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = null, spare = false } = {}) {
   if (!current()) return;
-  if (busy) {                                        // Meta is busy: do it next instead of dropping it
-    queued = [command, mode, { escalate, hintLevel }];
+  if (busy || meta.writing) {                        // Meta is busy: do it next instead of dropping it
+    queued = [command, mode, { escalate, hintLevel, spare: true }];
     toast(`Meta is still writing. It’ll do “${command.length > 40 ? command.slice(0, 39) + '…' : command}” next.`);
     return;
   }
@@ -510,11 +536,11 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
     hintMemo = resp.mode === 'hint' && wrong ? { sig, text: wrong.text, level: payload.hint_level } : null;
     nb.checkpoint();                                 // undo removes Meta's new ink
     setMetaHidden(false);
-    await meta.render(resp, lines, { command, mode, hint_level: payload.hint_level });
+    await meta.render(resp, lines, { command, mode, hint_level: payload.hint_level }, { spare });
     if (current()?.id === pageId) {
       saveNow();
       // After a hint: offer "Why?" and the next step right by it.
-      const note = resp.mode === 'hint' && meta.marks.find(m => m.kind === 'note');
+      const note = resp.mode === 'hint' && meta.marks.findLast(m => m.kind === 'note');
       if (note && suggestOn()) { const b = note.box || note.boxes.at(-1); suggest.show(['why', 'more', 'next'], { x: b[0] + b[2] - 10, y: b[1] + b[3] + 22 }); }
     }
   } catch (err) {
@@ -523,8 +549,16 @@ async function callMeta(command, mode = 'auto', { escalate = false, hintLevel = 
   } finally {
     busy = false;
     showReading(false);
-    if (queued) { const q = queued; queued = null; setTimeout(() => callMeta(...q), 60); }
+    runQueued();
   }
+}
+// The queued command runs only once the reply before it has finished writing and is baked into the
+// page, and its reply keeps that answer (render's spare) instead of replacing it.
+function runQueued() {
+  if (!queued) return;
+  if (busy || meta.writing) { setTimeout(runQueued, 120); return; }
+  const q = queued; queued = null;
+  setTimeout(() => callMeta(...q), 60);
 }
 
 // What Meta did, as a tiny fading breadcrumb by the Hey Meta button: "Meta: read page → checked steps → wrote hint".

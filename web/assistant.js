@@ -188,7 +188,7 @@ export class MetaInk {
     const by = new Map();
     for (const it of this.nb.items) if (isMeta(it)) { const k = it.grp || it; if (!by.has(k)) by.set(k, []); by.get(k).push(it); }
     return [...by.values()].map(items => ({
-      kind: items[0].mk || 'note', items, baked: true, pts: [],
+      kind: items[0].mk || 'note', rid: items[0].rid || null, items, baked: true, pts: [],
       strokes: items.reduce((n, it) => n + (it.segs?.length ?? (it.type === 'stroke' ? 1 : 0)), 0),
       boxes: items.map(it => it.bbox), box: unionBox(items.map(it => it.bbox)),
       note: items.find(it => it.note)?.note || null, text: items.find(it => it.say)?.say || '', kept: items.some(it => it.kept),
@@ -198,7 +198,7 @@ export class MetaInk {
   // ---- layer management ------------------------------------------------------
   mark(kind) {
     const g = svgEl('g', { class: `mark ${kind}` }, this.svg);
-    const m = { g, kind, pts: [], boxes: [] };
+    const m = { g, kind, pts: [], boxes: [], rid: this.pid };      // rid: which reply wrote it
     this.live.push(m);
     return m;
   }
@@ -216,11 +216,13 @@ export class MetaInk {
     return n;
   }
   // Only the marks of the given kinds, so tidy-ups, graphs and accepted answers survive a new hint.
-  clearKinds(kinds) {
+  // spare: a reply id whose marks stay (a queued command must not wipe the answer just before it).
+  clearKinds(kinds, spare = null) {
     this.run++;
-    this.fadeOut(this.live.filter(m => kinds.has(m.kind)));
-    this.live = this.live.filter(m => !kinds.has(m.kind));
-    this.nb.removeMeta(it => kinds.has(it.mk) && !it.kept);
+    const go = m => kinds.has(m.kind) && !(spare && m.rid === spare);
+    this.fadeOut(this.live.filter(go));
+    this.live = this.live.filter(m => !go(m));
+    this.nb.removeMeta(it => kinds.has(it.mk) && !it.kept && !(spare && it.rid === spare));
     this.syncPills();
   }
   // The eraser on live marks (previews, read labels): stroke by stroke, like ink.
@@ -311,7 +313,7 @@ export class MetaInk {
     const color = this.color(), grp = `g${Date.now().toString(36)}${++this.n}`;
     const paths = [...m.g.querySelectorAll('path.ink-stroke')];
     const plain = paths.length && !m.g.querySelector('text, path.shade, [stroke-dasharray]') && paths.every(p => p._polys?.length);
-    const base = { by: 'meta', mk: m.kind, grp, ...extra };
+    const base = { by: 'meta', mk: m.kind, grp, ...(m.rid ? { rid: m.rid } : {}), ...extra };
     let items;
     if (plain) {
       const segs = paths.flatMap(p => {
@@ -561,13 +563,16 @@ export class MetaInk {
     return { n, base: r => rowY(r) - RULE + 2 + (n * RULE - (h + d)) / 2 + h };
   }
 
-  async render(resp, sentLines, ask = null) {
+  // spare: keep the previous reply's marks (set for a command that was queued behind it).
+  async render(resp, sentLines, ask = null, { spare = false } = {}) {
     // Typeset and graph ink stack with hints; each kind of answer replaces only its own kind.
-    const EXTRAS = new Set(['typeset', 'graph']);
+    // The first-run tip stays until the student erases it.
+    const EXTRAS = new Set(['typeset', 'graph', 'tip']);
     const kinds = new Set((resp.annotations || []).map(a => a.kind));
     const extrasOnly = kinds.size > 0 && [...kinds].every(k => EXTRAS.has(k));
-    if (extrasOnly) this.clearKinds(kinds);
-    else this.clearKinds(new Set(this.marks.map(m => m.kind).filter(k => !EXTRAS.has(k))));
+    const keep = spare ? this.pid : null;
+    if (extrasOnly) this.clearKinds(kinds, keep);
+    else this.clearKinds(new Set(this.marks.map(m => m.kind).filter(k => !EXTRAS.has(k))), keep);
     this.nb.redraw(); this.syncColor();
     this.writing = true;
     this.fast = matchMedia('(prefers-reduced-motion: reduce)').matches;     // reduced motion: ink appears at once
@@ -589,16 +594,46 @@ export class MetaInk {
     const order = { tick: 0, circle: 1, underline: 2, note: 3, ghost: 4, write: 5, typeset: 6, graph: 7 };
     const todo = anns.filter(a => a.kind in order).sort((a, b) => order[a.kind] - order[b.kind]);
     if (!todo.length && resp.verdict) todo.push({ kind: 'note', target: null, text: resp.verdict });
-    for (const a of todo) {
-      if (token !== this.run) { this.writing = false; this.fast = false; return; }
-      const before = new Set(this.live);
-      try { await this[`a_${a.kind}`](a, token); } catch (err) { console.warn('[margin] skipped annotation', a, err); }
-      // Meta lifted the pen: what it just wrote becomes notebook ink (previews wait for Accept).
-      if (token === this.run) for (const m of this.live.filter(m => !before.has(m) && !m.pending && m.kind !== 'read')) this.bake(m);
-      if (!this.fast) await sleep(a.kind === 'tick' ? 40 : 140);
+    const pid = this.pid;
+    try {
+      for (const a of todo) {
+        if (token !== this.run) return todo.length;
+        const before = new Set(this.live);
+        try { await this[`a_${a.kind}`](a, token); } catch (err) { console.warn('[margin] skipped annotation', a, err); }
+        // Meta lifted the pen: what it just wrote becomes notebook ink (previews wait for Accept).
+        if (token === this.run) for (const m of this.live.filter(m => !before.has(m) && !m.pending && m.kind !== 'read')) this.bake(m);
+        if (!this.fast) await sleep(a.kind === 'tick' ? 40 : 140);
+      }
+      if (token === this.run) this.syncPills();
+      return todo.length;
+    } finally {
+      if (this.pid === pid) { this.writing = false; this.fast = false; }   // never left "writing" (it gates the queue)
     }
-    if (token === this.run) { this.syncPills(); this.writing = false; this.fast = false; }
-    return todo.length;
+  }
+
+  // First-run tip: two short lines in Meta's hand, right-aligned in the space between the page header
+  // and the first rule (a new page is empty there), as ordinary erasable by:'meta' ink. Kept, so a reply
+  // never replaces it; never sent to Meta (by:'meta' ink is left out of what Meta reads).
+  async writeTip(lines = ['Tap the mic or press / to ask me', 'scribble to erase · hold to move']) {
+    const em = 17, right = PAGE_W - 40, bases = [rowY(0) - 40, rowY(0) - 15];
+    const boxes = lines.map(t => this.box_(() => textBox(t)));
+    if (boxes.some(b => !b)) return false;
+    const w = Math.max(...boxes.map(b => b.w * em));
+    const area = [right - w - 6, bases[0] - em, w + 12, bases[1] - bases[0] + em * 1.4];
+    if (!this.isFree(area)) return false;
+    this.syncColor();
+    this.pid = `tip${Date.now().toString(36)}`;
+    const m = this.mark('tip'), token = this.run;
+    m.g.setAttribute('aria-label', lines.join(' · '));
+    this.writing = true;
+    try {
+      for (let i = 0; i < lines.length; i++) await this.hand(m, boxes[i], right - boxes[i].w * em, bases[i], em, token, { label: lines[i], maxMs: 1400, reveal: false, width: 1.5 });
+      if (!this.live.includes(m)) return false;
+      if (token !== this.run) { m.g.remove(); this.live = this.live.filter(x => x !== m); return false; }
+      const [it] = this.bake(m, { kept: true });
+      if (it) it.say = lines.join(' · ');
+      return !!it;
+    } finally { this.writing = false; this.fast = false; }
   }
 
   readLabel(l) {

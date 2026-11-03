@@ -455,7 +455,7 @@ body.on-shelf .trace { display: none; }
 
 /* Round 2: iPad labels and touch targets */
 .toggle .short { display: none; font-weight: 500; }
-@media (max-width: 1240px) { #meta-eye .short { display: inline; } }
+@media (max-width: 1240px) { .toggle .short { display: inline; } }
 .reading.writing { animation: none; }
 @media (pointer: coarse) {
   .toggle, .sel-dots button, .meta-inks button { position: relative; }

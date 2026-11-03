@@ -514,7 +514,7 @@ def test_quantize_keeps_meta_ink_tags_and_graph_marks():
     """Meta's handwriting is stored as items tagged by='meta'; cloud sync must keep the tags."""
     meta_stroke = {
         "type": "stroke", "color": "#d0452b", "size": 1.9, "sim": False, "mono": True, "op": 0.75,
-        "by": "meta", "mk": "note", "grp": "g1", "say": "Check your signs", "kept": True,
+        "by": "meta", "mk": "note", "grp": "g1", "rid": "p1", "say": "Check your signs", "kept": True,
         "note": {"kind": "note", "target": "L3", "text": "Check your signs"},
         "pts": [[10, 10, 0.5], [20, 12, 0.5]],
     }
@@ -525,6 +525,7 @@ def test_quantize_keeps_meta_ink_tags_and_graph_marks():
     assert count == 2
     m, s, g = opt
     assert (m["by"], m["mk"], m["grp"], m["kept"], m["mono"], m["op"]) == ("meta", "note", "g1", True, True, 0.75)
+    assert m["rid"] == "p1"  # which reply wrote it: a queued reply keeps the one before it
     assert m["note"]["text"] == "Check your signs"
     assert "by" not in s and "mono" not in s
     assert g["type"] == "mark" and g["by"] == "meta" and g["box0"] == [700.0, 300.0, 260.0, 180.0]
