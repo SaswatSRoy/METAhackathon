@@ -161,7 +161,7 @@ def test_router_off_by_default_keeps_current_behaviour(monkeypatch):
     body = client.post("/api/assist", json={"lines": lines(*WRONG_PAGE), "command": "help"}).json()
     assert not router.enabled() and called == []
     assert "router" not in body and body["mode"] == "hint"
-    assert client.get("/api/health").json() == {"ok": True, "offline": True, "model": "muse-spark-1.3"}
+    assert client.get("/api/health").json() == {"ok": True, "offline": True, "model": "muse-spark-1.3", "realtime": False}
 
 
 def test_router_decision_runs_one_tool_without_spark(monkeypatch, router_on):
