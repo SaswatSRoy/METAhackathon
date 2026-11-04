@@ -133,9 +133,12 @@ async function saveNow() {
 addEventListener('pagehide', () => saveNow());
 document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
 
+let cloudSync = null;                                // the first cloud sync after start, kept while it runs
 async function openNotebook(id, pageId) {
-  const book = await store.getNotebook(id);
-  if (!book) { showShelf(); return; }
+  let book = await store.getNotebook(id);
+  // Signed in, that sync may still be bringing the notebook down (start waits at most 4 s): give it a little longer.
+  if (!book && cloudSync) { await Promise.race([cloudSync, sleep(6000)]); book = await store.getNotebook(id); }
+  if (!book) return notebookNotHere();
   const pages = [];
   for (const pid of book.pages || []) { const p = await store.getPage(pid); if (p) pages.push(p); }
   if (!pages.length) { const p = newPage(book.id); await store.putPage(p); pages.push(p); }
@@ -306,6 +309,13 @@ async function showShelf() {
   shelf.show(true);
 }
 $('#to-shelf').onclick = () => { location.hash = ''; };
+// A link to a notebook this device doesn't have (shared, or saved on another device): say why the shelf opened.
+async function notebookNotHere() {
+  history.replaceState(null, '', location.pathname + location.search);
+  await showShelf();
+  if (authClient.isAuthenticated()) toast('That notebook isn’t in your account. It may be someone else’s, or deleted.');
+  else toast('That notebook isn’t on this device. Sign in to sync notebooks between devices.', { label: 'Sign in', fn: openAccountModal });
+}
 
 async function route() {
   const m = /^#\/n\/([^/]+)(?:\/([^/]+))?/.exec(location.hash);
@@ -1072,7 +1082,7 @@ $('#toolbar-account')?.addEventListener('click', openAccountModal);
   updateAccountPill();
   if (!store.persistent) $('#storage-note').textContent = 'Storage is unavailable in this browser mode, so notebooks last until you close the tab.';
   // The data server may be asleep or far away: wait at most 4 s, then open the notebooks anyway.
-  if (authClient.isAuthenticated()) await Promise.race([store.syncWithCloud(), new Promise(r => setTimeout(r, 4000))]);
+  if (authClient.isAuthenticated()) { cloudSync = store.syncWithCloud(); await Promise.race([cloudSync, sleep(4000)]); }
   await seed();
   await route();
 })();
